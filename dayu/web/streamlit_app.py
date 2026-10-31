@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         WriteServiceProtocol,
     )
     from dayu.services.startup_preparation import PreparedHostRuntimeDependencies
+    from dayu.web.streamlit.model_options import ModelOption
 
 MODULE = "WEB.STREAMLIT.APP"
 
@@ -87,6 +88,13 @@ def _prepare_host_runtime() -> PreparedHostRuntimeDependencies | None:
 
     from dayu.log import Log
     Log.info(f"工作区根目录: {workspace_root}", module=MODULE)
+
+    from dayu.web.env_file import load_workspace_env
+
+    # 工作区 .env 需在装配前注入：llm_models 的环境变量占位符在模型加载时才会替换。
+    loaded_env_keys = load_workspace_env(workspace_root)
+    if loaded_env_keys:
+        Log.info(f"已从工作区 .env 注入环境变量: {', '.join(loaded_env_keys)}", module=MODULE)
 
     from dayu.services.startup_preparation import prepare_host_runtime_dependencies
 
@@ -171,8 +179,10 @@ def _ensure_session_state_initialized() -> None:
 def main() -> None:
     """Streamlit 应用主入口。"""
 
+    from dayu.web.streamlit.components.model_panel import MODEL_SCENES, render_model_panel
     from dayu.web.streamlit.components.sidebar import render_sidebar
-    from dayu.web.streamlit.pages.main_page import render_welcome_page, render_stock_detail_page
+    from dayu.web.streamlit.model_options import load_scene_model_options
+    from dayu.web.streamlit.pages.main_page import render_stock_detail_page, render_welcome_page
 
     _configure_streamlit_page()
     _ensure_session_state_initialized()
@@ -191,8 +201,25 @@ def main() -> None:
 
     workspace_root = _resolve_workspace_root()
 
+    model_options_by_scene: dict[str, tuple[ModelOption, ...]] = {}
+    if prepared_deps is not None:
+        for scene_name in MODEL_SCENES:
+            model_options_by_scene[scene_name] = load_scene_model_options(
+                config_loader=prepared_deps.workspace.config_loader,
+                prompt_asset_store=prepared_deps.workspace.prompt_asset_store,
+                scene_name=scene_name,
+            )
+
     # 左侧边栏：渲染自选股列表
     selected_stock = render_sidebar(workspace_root=workspace_root)
+
+    # 左侧边栏：渲染模型选择与 Key 配置
+    model_selections: dict[str, str] = {}
+    if prepared_deps is not None:
+        model_selections = render_model_panel(
+            workspace_root=workspace_root,
+            options_by_scene=model_options_by_scene,
+        )
 
     # 主功能区
     if selected_stock is None:
@@ -205,6 +232,7 @@ def main() -> None:
             fins_service=fins_service,
             chat_service=chat_service,
             write_service=write_service,
+            model_selections=model_selections,
         )
     else:
         st.error("财报服务不可用，无法展示股票详情。请检查配置后刷新页面。")

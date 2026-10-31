@@ -189,8 +189,9 @@ class TestChatStreamRuntimePolling:
             started_at=0.0,
             last_chunk_at=0.0,
             has_received_chunk=False,
+            ticker=ticker,
         )
-        CHAT_STREAM_RUNTIME_HANDLES[ticker] = runtime
+        CHAT_STREAM_RUNTIME_HANDLES[stream_state_key] = runtime
         monkeypatch.setattr(stream_runtime.time, "perf_counter", lambda: 100.0)
         monkeypatch.setattr(stream_runtime, "_STREAM_FIRST_CHUNK_TIMEOUT_SECONDS", 1.0)
 
@@ -214,8 +215,9 @@ class TestChatStreamRuntimePolling:
             started_at=10.0,
             last_chunk_at=0.0,
             has_received_chunk=True,
+            ticker=ticker,
         )
-        CHAT_STREAM_RUNTIME_HANDLES[ticker] = runtime
+        CHAT_STREAM_RUNTIME_HANDLES[stream_state_key] = runtime
         monkeypatch.setattr(stream_runtime.time, "perf_counter", lambda: 100.0)
         monkeypatch.setattr(stream_runtime, "_STREAM_CHUNK_TIMEOUT_SECONDS", 1.0)
 
@@ -239,8 +241,9 @@ class TestChatStreamRuntimePolling:
             started_at=0.0,
             last_chunk_at=0.0,
             has_received_chunk=False,
+            ticker=ticker,
         )
-        CHAT_STREAM_RUNTIME_HANDLES[ticker] = runtime
+        CHAT_STREAM_RUNTIME_HANDLES[stream_state_key] = runtime
 
         state = poll_chat_stream_events(ticker=ticker, stream_state_key=stream_state_key)
 
@@ -265,8 +268,9 @@ class TestChatStreamRuntimePolling:
             started_at=0.0,
             last_chunk_at=0.0,
             has_received_chunk=True,
+            ticker=ticker,
         )
-        CHAT_STREAM_RUNTIME_HANDLES[ticker] = runtime
+        CHAT_STREAM_RUNTIME_HANDLES[stream_state_key] = runtime
 
         polled = poll_chat_stream_events(ticker=ticker, stream_state_key=stream_state_key)
 
@@ -330,8 +334,9 @@ def test_run_stream_worker_emits_error_and_done_on_exception(monkeypatch: pytest
         event_queue: Queue[StreamQueueItem],
         cancel_event: threading.Event,
         trace_id: str,
+        model_name: str | None = None,
     ) -> None:
-        _ = (chat_service, user_text, session_id, ticker, event_queue, cancel_event, trace_id)
+        _ = (chat_service, user_text, session_id, ticker, event_queue, cancel_event, trace_id, model_name)
         raise RuntimeError("worker failed")
 
     monkeypatch.setattr(stream_runtime, "consume_chat_event_stream", _raise_in_consumer)
