@@ -13,10 +13,8 @@ from dayu.web.streamlit.pages.chat.utils import (
     extract_stream_text,
     fold_app_events_to_assistant_text,
     normalize_stream_text_for_markdown,
-    should_keep_current_frame_for_side_effects,
     summarize_user_text,
 )
-
 
 _TRACE_ID_PATTERN = re.compile(r"^[A-Z0-9]+-\d{13}-\d{5}$")
 
@@ -79,27 +77,6 @@ class TestSummarizeUserText:
 
     def test_len_field_matches_input(self) -> None:
         assert "len=5" in summarize_user_text("abcde")
-
-
-@pytest.mark.unit
-class TestShouldKeepCurrentFrame:
-    def test_empty_text_no_side_effects(self) -> None:
-        assert should_keep_current_frame_for_side_effects(assistant_text="", side_messages=[]) is False
-
-    def test_empty_text_with_side_effects(self) -> None:
-        assert should_keep_current_frame_for_side_effects(assistant_text="", side_messages=["err"]) is True
-
-    def test_non_empty_text_no_side_effects(self) -> None:
-        assert should_keep_current_frame_for_side_effects(assistant_text="hello", side_messages=[]) is False
-
-    def test_non_empty_text_with_side_effects(self) -> None:
-        assert should_keep_current_frame_for_side_effects(assistant_text="hello", side_messages=["warn"]) is False
-
-    def test_whitespace_only_text_no_side_effects(self) -> None:
-        assert should_keep_current_frame_for_side_effects(assistant_text="   ", side_messages=[]) is False
-
-    def test_whitespace_only_text_with_side_effects(self) -> None:
-        assert should_keep_current_frame_for_side_effects(assistant_text="  \n ", side_messages=["x"]) is True
 
 
 @pytest.mark.unit

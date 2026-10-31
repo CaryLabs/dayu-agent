@@ -37,12 +37,15 @@ class ModelOption:
         is_allowed: 是否已在该 scene 的 ``allowed_names`` 放行列表中；为 False
             时选中后需要补写放行列表才能执行。
         missing_env_vars: 该模型引用但当前进程未设置的环境变量名。
+        required_env_vars: 该模型引用的全部环境变量名（含已配置的），用于在界面上
+            直接说明「当前生效的是哪个 Key」。
     """
 
     name: str
     is_default: bool
     is_allowed: bool
     missing_env_vars: tuple[str, ...]
+    required_env_vars: tuple[str, ...] = ()
 
     @property
     def is_ready(self) -> bool:
@@ -145,6 +148,7 @@ def load_scene_model_options(
                 is_default=name == default_name,
                 is_allowed=name in allowed_name_set,
                 missing_env_vars=missing_env_vars,
+                required_env_vars=tuple(required_env_vars),
             )
         )
     return tuple(options)

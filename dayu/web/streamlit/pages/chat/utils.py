@@ -303,20 +303,3 @@ def summarize_user_text(user_text: str) -> str:
     preview = normalized[:48]
     suffix = "..." if len(normalized) > len(preview) else ""
     return f"len={len(user_text)}, preview={preview!r}{suffix}"
-
-
-def should_keep_current_frame_for_side_effects(*, assistant_text: str, side_messages: list[str]) -> bool:
-    """判断是否需要保留当前页面帧以展示侧边错误。
-
-    参数:
-        assistant_text: 助手回复正文文本。
-        side_messages: 流式副作用消息列表（warning/error/cancelled）。
-
-    返回值:
-        当回复为空且存在副作用消息时返回 ``True``，表示应保留当前帧。
-
-    异常:
-        无。
-    """
-
-    return (not assistant_text.strip()) and bool(side_messages)

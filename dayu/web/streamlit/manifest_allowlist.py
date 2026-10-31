@@ -25,6 +25,43 @@ _SCENE_NAME_PATTERN = re.compile(r"^[a-z0-9_]+$")
 _MODEL_SECTION_KEY = "model"
 _ALLOWED_NAMES_KEY = "allowed_names"
 
+#: 界面 scene 到「实际会复用该模型」的 scene 集合。
+#:
+#: 界面只暴露 interactive / write 两个 scene，但写作流水线内部还会用 infer/audit/
+#: confirm 等 scene 执行，且这些内部 scene 会继承界面下发的模型名。若只给界面
+#: scene 放行，运行时会因内部 scene 的 allowlist 不含该模型而报
+#: 「当前执行请求的模型不在 scene allowlist 中」。
+_SCENE_MODEL_SCOPE: dict[str, tuple[str, ...]] = {
+    "interactive": ("interactive", "conversation_compaction"),
+    "write": (
+        "write",
+        "regenerate",
+        "fix",
+        "repair",
+        "overview",
+        "infer",
+        "decision",
+        "audit",
+        "confirm",
+    ),
+}
+
+
+def model_scope_scenes(scene_name: str) -> tuple[str, ...]:
+    """返回某个界面 scene 对应的放行范围。
+
+    参数:
+        scene_name: 界面上的 scene 名称。
+
+    返回值:
+        需要同时放行该模型的 scene 名称元组；未登记时只返回自身。
+
+    异常:
+        无。
+    """
+
+    return _SCENE_MODEL_SCOPE.get(scene_name, (scene_name,))
+
 
 def manifest_path_for(config_root: Path, scene_name: str) -> Path:
     """返回指定 scene 在某个配置根下的 manifest 路径。
@@ -125,3 +162,44 @@ def ensure_scene_model_allowed(
         encoding="utf-8",
     )
     return True
+
+
+def ensure_scene_model_allowed_in_scope(
+    *,
+    workspace_root: Path,
+    config_dirs: Sequence[Path],
+    scene_name: str,
+    model_name: str,
+) -> tuple[str, ...]:
+    """确保模型在界面 scene 及其下游 scene 全部放行。
+
+    参数:
+        workspace_root: 工作区根目录。
+        config_dirs: 配置目录搜索顺序。
+        scene_name: 界面 scene 名称。
+        model_name: 需要放行的模型名。
+
+    返回值:
+        实际写入覆盖文件的 scene 名称元组；全部已放行时为空元组。
+
+    异常:
+        TypeError: manifest 结构不合法时抛出。
+        ValueError: scene 名称或模型名非法时抛出。
+        OSError: 目录创建或写入失败时抛出。
+    """
+
+    written: list[str] = []
+    for target_scene in model_scope_scenes(scene_name):
+        try:
+            changed = ensure_scene_model_allowed(
+                workspace_root=workspace_root,
+                config_dirs=config_dirs,
+                scene_name=target_scene,
+                model_name=model_name,
+            )
+        except FileNotFoundError:
+            # 该 scene 未在当前安装下提供 manifest，跳过而不是中断保存。
+            continue
+        if changed:
+            written.append(target_scene)
+    return tuple(written)

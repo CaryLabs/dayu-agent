@@ -15,7 +15,9 @@ import pytest
 
 from dayu.web.streamlit.manifest_allowlist import (
     ensure_scene_model_allowed,
+    ensure_scene_model_allowed_in_scope,
     manifest_path_for,
+    model_scope_scenes,
     read_effective_manifest,
 )
 
@@ -178,3 +180,63 @@ class TestRealManifests:
         model_section = raw["model"]
         assert isinstance(model_section, dict)
         assert "mimo-v2.5-pro-thinking-plan" in model_section["allowed_names"]
+
+
+@pytest.mark.unit
+class TestSceneModelScope:
+    """下游 scene 联动放行测试。
+
+    写作流水线内部会用 infer/audit/confirm 等 scene，且继承界面下发的模型名；
+    只给 write 放行会在运行时报「模型不在 scene allowlist 中」。
+    """
+
+    def test_write_scope_covers_internal_scenes(self) -> None:
+        """写报告范围应覆盖审计链路 scene。"""
+        scenes = model_scope_scenes("write")
+
+        assert "write" in scenes
+        for internal in ("infer", "decision", "audit", "confirm"):
+            assert internal in scenes
+
+    def test_interactive_scope_includes_compaction(self) -> None:
+        """交互式范围应覆盖会话压缩 scene。"""
+        assert set(model_scope_scenes("interactive")) == {"interactive", "conversation_compaction"}
+
+    def test_unknown_scene_falls_back_to_self(self) -> None:
+        """未登记的 scene 只放行自身。"""
+        assert model_scope_scenes("unknown_scene") == ("unknown_scene",)
+
+    def test_scope_writes_all_available_scenes(self, tmp_path: Path) -> None:
+        """范围放行会为每个存在的 manifest 写入模型。"""
+        package_root = tmp_path / "package_config"
+        workspace_root = tmp_path / "workspace"
+        payload = {"model": {"default_name": "m-a", "allowed_names": ["m-a"]}}
+        for scene in ("write", "infer", "audit"):
+            _write_manifest(package_root, scene, payload)
+
+        written = ensure_scene_model_allowed_in_scope(
+            workspace_root=workspace_root,
+            config_dirs=(workspace_root / "config", package_root),
+            scene_name="write",
+            model_name="m-new",
+        )
+
+        assert set(written) == {"write", "infer", "audit"}
+        for scene in written:
+            saved = read_effective_manifest((workspace_root / "config",), scene)
+            assert "m-new" in saved["model"]["allowed_names"]
+
+    def test_scope_skips_missing_manifest(self, tmp_path: Path) -> None:
+        """缺失的 scene manifest 跳过，不影响其余写入。"""
+        package_root = tmp_path / "package_config"
+        workspace_root = tmp_path / "workspace"
+        _write_manifest(package_root, "write", {"model": {"default_name": "m-a", "allowed_names": ["m-a"]}})
+
+        written = ensure_scene_model_allowed_in_scope(
+            workspace_root=workspace_root,
+            config_dirs=(workspace_root / "config", package_root),
+            scene_name="write",
+            model_name="m-new",
+        )
+
+        assert written == ("write",)

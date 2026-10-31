@@ -27,7 +27,7 @@ from dayu.contracts.agent_execution import (
 )
 from dayu.contracts.agent_types import AgentMessage
 from dayu.contracts.host_execution import ConcurrencyAcquirePolicy
-from dayu.contracts.run import RunCancelReason, RunState
+from dayu.contracts.run import RunCancelReason, RunRecord, RunState
 from dayu.execution.options import ConversationMemorySettings, ExecutionOptions
 from dayu.host.host import Host
 from dayu.host.conversation_store import ConversationTranscript
@@ -3044,6 +3044,135 @@ def test_register_accepted_pending_turn_absorbs_clearing_failed_error() -> None:
         run_id="run_test",
     )
     assert result is None
+
+
+@pytest.mark.unit
+def test_register_accepted_pending_turn_discards_stale_terminal_turn() -> None:
+    """残留的终态 pending turn（失败/超时）应在重新登记时被清理，不再阻塞新提交。
+
+    回归：resumable scene 失败后 pending turn 有意保留等待 resume；但 Web 交互问答
+    的重提交是「重新提问」而非 resume，旧 turn 会触发 upsert 抛「已存在活跃 pending
+    turn，不能写入不同 user_text」。登记 accepted 真源前应主动清除已失效旧 turn。
+    """
+
+    from datetime import datetime, timezone
+
+    from dayu.host.pending_turn_store import InMemoryPendingConversationTurnStore
+
+    pending_store = InMemoryPendingConversationTurnStore()
+
+    class _TerminalRunRegistry:
+        def __init__(self) -> None:
+            self.records = {
+                "run_stale": RunRecord(
+                    run_id="run_stale",
+                    session_id="s1",
+                    service_type="chat_turn",
+                    scene_name="interactive",
+                    state=RunState.FAILED,
+                    created_at=datetime.now(timezone.utc),
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
+                ),
+            }
+
+        def get_run(self, run_id: str):
+            return self.records.get(run_id)
+
+    # 预置一条关联终态 run 的旧 turn（user_text 不同，模拟失败残留）。
+    pending_store.upsert_pending_turn(
+        session_id="s1",
+        scene_name="interactive",
+        user_text="old question",
+        source_run_id="run_stale",
+        resumable=True,
+        state=PendingConversationTurnState.PREPARED_BY_HOST,
+    )
+
+    executor = DefaultHostExecutor(
+        run_registry=_TerminalRunRegistry(),  # type: ignore[arg-type]
+        pending_turn_store=pending_store,
+    )
+    contract = ExecutionContract(
+        service_name="chat_turn",
+        scene_name="interactive",
+        host_policy=ExecutionHostPolicy(session_key="s1", resumable=True),
+        preparation_spec=ScenePreparationSpec(),
+        message_inputs=ExecutionMessageInputs(user_message="new question"),
+        accepted_execution_spec=_minimal_accepted_execution_spec(),
+        execution_options=ExecutionOptions(),
+        metadata={"delivery_channel": "interactive"},
+    )
+    result = executor._register_accepted_pending_turn(  # type: ignore[attr-defined]
+        execution_contract=contract,
+        run_id="run_new",
+    )
+    assert result is not None
+    remaining = pending_store.list_pending_turns(session_id="s1", scene_name="interactive")
+    assert len(remaining) == 1
+    assert remaining[0].user_text == "new question"
+    assert remaining[0].state == PendingConversationTurnState.ACCEPTED_BY_HOST
+
+
+@pytest.mark.unit
+def test_register_accepted_pending_turn_keeps_active_turn() -> None:
+    """关联 run 仍活跃时，残留 pending turn 必须保留，交由 upsert 拒绝并发写入。"""
+
+    from datetime import datetime, timezone
+
+    from dayu.host.pending_turn_store import InMemoryPendingConversationTurnStore
+
+    pending_store = InMemoryPendingConversationTurnStore()
+
+    class _ActiveRunRegistry:
+        def __init__(self) -> None:
+            self.records = {
+                "run_active": RunRecord(
+                    run_id="run_active",
+                    session_id="s1",
+                    service_type="chat_turn",
+                    scene_name="interactive",
+                    state=RunState.RUNNING,
+                    created_at=datetime.now(timezone.utc),
+                    started_at=datetime.now(timezone.utc),
+                ),
+            }
+
+        def get_run(self, run_id: str):
+            return self.records.get(run_id)
+
+    pending_store.upsert_pending_turn(
+        session_id="s1",
+        scene_name="interactive",
+        user_text="old question",
+        source_run_id="run_active",
+        resumable=True,
+        state=PendingConversationTurnState.PREPARED_BY_HOST,
+    )
+
+    executor = DefaultHostExecutor(
+        run_registry=_ActiveRunRegistry(),  # type: ignore[arg-type]
+        pending_turn_store=pending_store,
+    )
+    contract = ExecutionContract(
+        service_name="chat_turn",
+        scene_name="interactive",
+        host_policy=ExecutionHostPolicy(session_key="s1", resumable=True),
+        preparation_spec=ScenePreparationSpec(),
+        message_inputs=ExecutionMessageInputs(user_message="new question"),
+        accepted_execution_spec=_minimal_accepted_execution_spec(),
+        execution_options=ExecutionOptions(),
+        metadata={"delivery_channel": "interactive"},
+    )
+    # 旧 turn 关联 run 仍活跃，不应被清理；upsert 因 user_text 不同抛 ValueError。
+    with pytest.raises(ValueError):
+        executor._register_accepted_pending_turn(  # type: ignore[attr-defined]
+            execution_contract=contract,
+            run_id="run_new",
+        )
+    remaining = pending_store.list_pending_turns(session_id="s1", scene_name="interactive")
+    assert len(remaining) == 1
+    assert remaining[0].user_text == "old question"
 
 
 # ---------------------------------------------------------------------------

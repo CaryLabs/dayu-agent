@@ -20,16 +20,15 @@ from dayu.services.protocols import ChatServiceProtocol
 from dayu.web.streamlit.components.watchlist import WatchlistItem
 from dayu.web.streamlit.pages.chat.stream_runtime import (
     ChatStreamFrameState,
-    read_stream_frame_state,
     clear_chat_stream_runtime,
     poll_chat_stream_events,
+    read_stream_frame_state,
     start_chat_stream_runtime,
 )
 from dayu.web.streamlit.pages.chat.utils import (
     build_chat_session_id,
     build_request_trace_id,
     normalize_stream_text_for_markdown,
-    should_keep_current_frame_for_side_effects,
     summarize_user_text,
 )
 
@@ -40,6 +39,16 @@ _INPUT_LABEL = "输入你的分析问题"
 _EMPTY_INPUT_WARNING = "请输入问题后再提交。"
 _MISSING_SERVICE_WARNING = "交互式分析服务未就绪，请检查服务初始化状态。"
 _EMPTY_ASSISTANT_REPLY_WARNING = "本轮未收到可展示的回复，请稍后重试或检查模型与网络配置。"
+
+#: 认证类失败的识别关键字，命中后给出「去改 Key」的明确指引。
+_AUTH_ERROR_KEYWORDS: tuple[str, ...] = (
+    "401",
+    "403",
+    "invalid api key",
+    "authentication",
+    "auth_error",
+    "unauthorized",
+)
 _THINKING_EXPANDER_TITLE = "思考内容"
 _USER_MESSAGE_COLUMN_SPEC: list[int] = [1, 3]
 _ASSISTANT_MESSAGE_COLUMN_SPEC: list[int] = [4, 1]
@@ -334,6 +343,58 @@ def perform_clear_session_history(
     st.rerun()
 
 
+def build_failure_hint(message: str) -> str:
+    """把失败信息转成可操作的下一步提示。
+
+    参数:
+        message: 原始失败信息。
+
+    返回值:
+        面向用户的一句话指引。
+
+    异常:
+        无。
+    """
+
+    lowered = (message or "").lower()
+    if any(keyword in lowered for keyword in _AUTH_ERROR_KEYWORDS):
+        return (
+            "这是模型 API Key 认证失败。请点左侧「⚙ 模型与 API Key」→「API Key」页签，"
+            "更新当前模型使用的 Key 后重新提问。"
+        )
+    if ("超时" in message) or ("timeout" in lowered):
+        return "请求超时。请确认网络能访问模型端点，或换一个模型重试。"
+    return "请检查左侧模型与 API Key 配置，或点「开始分析」重新提问。"
+
+
+def _compose_failure_message(*, error_message: str, assistant_text: str, side_messages: list[str]) -> str:
+    """合成本轮失败的持久化展示文案。
+
+    第二轮起页面不再重绘 fragment，因此把错误与副作用消息写进会话状态，
+    由整页 rerun 后的主区统一展示，避免回复为空时页面停在「正在分析」。
+
+    参数:
+        error_message: 流式帧上记录的失败信息。
+        assistant_text: 助手回复正文。
+        side_messages: 流式副作用消息列表。
+
+    返回值:
+        需要持久化展示的失败文案；无需展示时为空串。
+
+    异常:
+        无。
+    """
+
+    normalized_error = (error_message or "").strip()
+    if normalized_error:
+        return normalized_error
+    if assistant_text.strip():
+        return ""
+    if side_messages:
+        return "；".join(str(message).strip() for message in side_messages if str(message).strip())
+    return _EMPTY_ASSISTANT_REPLY_WARNING
+
+
 @st.fragment(run_every=0.5)
 def _render_stream_polling_fragment(
     *,
@@ -341,18 +402,21 @@ def _render_stream_polling_fragment(
     stream_state_key: str,
     message_state_key: str,
     clear_input_key: str,
+    error_state_key: str,
 ) -> None:
     """渲染流式帧并轮询事件直到本轮完成。
 
     该 fragment 独立于主页面渲染，通过 ``run_every`` 自动刷新，
     仅重执行自身而非全部 Tab。流结束后触发全量 rerun，
-    fragment 不再渲染，定时器自动停止。
+    fragment 不再渲染，定时器自动停止。失败信息先落到会话状态再 rerun，
+    保证重绘后「开始分析」按钮恢复可用、错误对用户可见。
 
     参数:
         ticker: 股票代码。
         stream_state_key: stream_state 的 session_state 键。
         message_state_key: messages 的 session_state 键。
         clear_input_key: clear_input_pending 的 session_state 键。
+        error_state_key: 失败信息持久化的 session_state 键。
 
     返回值:
         无。
@@ -373,31 +437,26 @@ def _render_stream_polling_fragment(
         return
 
     trace_id = stream_state.trace_id
-    if stream_state.error_message.strip():
+    assistant_text = normalize_stream_text_for_markdown(stream_state.answer_text)
+    failure_text = _compose_failure_message(
+        error_message=stream_state.error_message,
+        assistant_text=assistant_text,
+        side_messages=stream_state.side_messages,
+    )
+    if failure_text:
         Log.error(
-            f"[{trace_id}] 交互式分析执行失败: {stream_state.error_message}",
+            f"[{trace_id}] 交互式分析未产出可展示结果: {failure_text}",
             module=MODULE,
         )
-        st.error(f"交互式分析执行失败：{stream_state.error_message}")
+        st.session_state[error_state_key] = failure_text
         clear_chat_stream_runtime(ticker=ticker, stream_state_key=stream_state_key)
+        st.rerun(scope="app")
         return
 
-    assistant_text = normalize_stream_text_for_markdown(stream_state.answer_text)
     assistant_reasoning_text = normalize_stream_text_for_markdown(stream_state.reasoning_text)
     side_messages = stream_state.side_messages
     filtered_flags = stream_state.filtered_flags
-
-    if not assistant_text.strip():
-        Log.warning(f"[{trace_id}] 回复完成但文本为空", module=MODULE)
-        st.warning(_EMPTY_ASSISTANT_REPLY_WARNING)
     present_stream_side_effects(side_messages, filtered_flags)
-    if should_keep_current_frame_for_side_effects(assistant_text=assistant_text, side_messages=side_messages):
-        Log.warning(
-            f"[{trace_id}] 检测到空回复且存在副作用消息，保留当前页面帧展示错误，不执行 rerun",
-            module=MODULE,
-        )
-        clear_chat_stream_runtime(ticker=ticker, stream_state_key=stream_state_key)
-        return
 
     messages = _ensure_messages(message_state_key)
     messages.append(
@@ -442,6 +501,7 @@ def render_chat_tab(
     input_key = _build_state_key(ticker, "input_text")
     clear_input_key = _build_state_key(ticker, "clear_input_pending")
     stream_state_key = _build_state_key(ticker, "stream_state")
+    error_state_key = _build_state_key(ticker, "last_error")
 
     stream_state = read_stream_frame_state(stream_state_key)
 
@@ -487,6 +547,11 @@ def render_chat_tab(
                     clear_input_key=clear_input_key,
                 )
 
+    last_error = str(st.session_state.get(error_state_key) or "").strip()
+    if last_error and (stream_state is None):
+        st.error(f"上一轮交互式分析未成功：{last_error}")
+        st.info(build_failure_hint(last_error))
+
     history_container = st.container()
     with history_container:
         if not messages:
@@ -499,6 +564,7 @@ def render_chat_tab(
                 stream_state_key=stream_state_key,
                 message_state_key=message_state_key,
                 clear_input_key=clear_input_key,
+                error_state_key=error_state_key,
             )
 
     user_text = st.text_area(
@@ -535,6 +601,7 @@ def render_chat_tab(
             st.warning(_MISSING_SERVICE_WARNING)
             return
         messages.append(ChatMessage(role="user", content=normalized_user_text))
+        st.session_state.pop(error_state_key, None)
         session_id = build_chat_session_id(ticker)
         Log.info(
             f"[{trace_id}] 开始请求流式回复: ticker={ticker}, session_id={session_id}, "

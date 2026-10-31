@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 MODULE = "WEB.ENV_FILE"
@@ -125,6 +126,126 @@ def load_workspace_env(workspace_root: Path) -> tuple[str, ...]:
     for key, value in values.items():
         os.environ[key] = value
     return tuple(sorted(values))
+
+
+@dataclass(frozen=True)
+class EnvKeyConflict:
+    """外部环境变量与工作区 ``.env`` 中同名键的值不一致。
+
+    属性:
+        key: 环境变量名。
+        source: 外部来源的人类可读描述（如「用户级环境变量」）。
+        env_tail: 工作区 ``.env`` 中该值末 4 位（脱敏）。
+        external_tail: 外部来源值末 4 位（脱敏）。
+    """
+
+    key: str
+    source: str
+    env_tail: str
+    external_tail: str
+
+
+def _mask_secret(value: str) -> str:
+    """脱敏一个密钥值，仅保留可识别的尾段。"""
+    if len(value) <= 4:
+        return "*" * len(value)
+    return f"...{value[-4:]}"
+
+
+def _read_windows_registry_env(hive: int, subkey: str) -> dict[str, str]:
+    """尽力读取 Windows 注册表中的环境变量，失败返回空映射。
+
+    不抛出异常：注册表可能不存在、无权限，或运行在非 Windows 平台。
+    """
+    try:
+        import winreg
+    except ImportError:
+        return {}
+
+    try:
+        with winreg.OpenKey(hive, subkey) as key:
+            result: dict[str, str] = {}
+            index = 0
+            while True:
+                try:
+                    name, value, _ = winreg.EnumValue(key, index)
+                except OSError:
+                    break
+                if isinstance(value, str):
+                    result[name] = value
+                index += 1
+            return result
+    except OSError:
+        return {}
+
+
+def detect_env_key_conflicts(workspace_root: Path) -> tuple[EnvKeyConflict, ...]:
+    """检测外部环境变量与工作区 ``.env`` 的同名键冲突。
+
+    目标场景：用户通过系统/用户级环境变量配置过 Key，随后又在界面里保存了另一个
+    Key 到工作区 ``.env``。此时二者并存且值不同，容易让人误判「界面改了 Key 却没
+    生效」。本函数以 ``.env`` 为准识别这类冲突，供启动自检告警。
+
+    检测来源（按优先级）：
+    - Windows 注册表「系统级 / 用户级」环境变量（精确、不受进程覆盖影响）；
+    - 进程继承的 ``os.environ``（非 Windows 或父进程注入的兜底来源）。
+
+    参数:
+        workspace_root: 工作区根目录。
+
+    返回值:
+        冲突列表，按键名字典序排列；无冲突时返回空元组。
+
+    异常:
+        无。注册表读取失败被收敛为空来源。
+    """
+
+    values = read_env_values(workspace_root)
+    if not values:
+        return ()
+
+    external: dict[str, tuple[str, str]] = {}
+
+    try:
+        import winreg
+    except ImportError:
+        user_env: dict[str, str] = {}
+        machine_env: dict[str, str] = {}
+    else:
+        user_env = _read_windows_registry_env(winreg.HKEY_CURRENT_USER, "Environment")
+        machine_env = _read_windows_registry_env(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        )
+
+    # Windows 语义：用户级覆盖系统级，故先写系统级、后写用户级。
+    for name, value in machine_env.items():
+        external[name] = ("系统级环境变量", value)
+    for name, value in user_env.items():
+        external[name] = ("用户级环境变量", value)
+
+    # 兜底：进程继承值（仅在外部注册表未命中时补充）。
+    for name, value in os.environ.items():
+        if name not in external and name in values:
+            external[name] = ("进程环境变量", value)
+
+    conflicts: list[EnvKeyConflict] = []
+    for key in sorted(values):
+        if key not in external:
+            continue
+        source, external_value = external[key]
+        env_value = values[key]
+        if external_value == env_value:
+            continue
+        conflicts.append(
+            EnvKeyConflict(
+                key=key,
+                source=source,
+                env_tail=_mask_secret(env_value),
+                external_tail=_mask_secret(external_value),
+            )
+        )
+    return tuple(conflicts)
 
 
 def upsert_env_value(workspace_root: Path, key: str, value: str) -> None:

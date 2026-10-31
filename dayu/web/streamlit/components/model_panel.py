@@ -19,9 +19,10 @@ from pathlib import Path
 
 import streamlit as st
 
+from dayu.log import Log
 from dayu.web.env_file import read_env_values, remove_env_value, upsert_env_value
 from dayu.web.streamlit.config_context import HOST_INIT_ERROR_KEY, reset_runtime_session_state
-from dayu.web.streamlit.manifest_allowlist import ensure_scene_model_allowed
+from dayu.web.streamlit.manifest_allowlist import ensure_scene_model_allowed_in_scope
 from dayu.web.streamlit.model_options import ModelOption, pick_effective_model_name
 
 MODULE = "WEB.MODEL_PANEL"
@@ -47,6 +48,14 @@ _DIALOG_TITLE = "模型与 API Key"
 _TAB_LABELS: tuple[str, str] = ("模型选择", "API Key")
 _SECRET_TAIL_LENGTH = 4
 
+#: Key 来源标记：工作区 ``.env``、系统环境变量、未配置。
+_SOURCE_ENV_FILE = "env_file"
+_SOURCE_SYSTEM_ENV = "system_env"
+_SOURCE_LABELS: dict[str, str] = {
+    _SOURCE_ENV_FILE: ".env",
+    _SOURCE_SYSTEM_ENV: "系统环境",
+}
+
 
 @dataclass(frozen=True)
 class ApiKeyStatus:
@@ -56,11 +65,13 @@ class ApiKeyStatus:
         env_var: 环境变量名。
         is_configured: 当前进程是否已能读到值（工作区 ``.env`` 或系统环境变量）。
         masked_value: 脱敏后的展示值；未配置时为空字符串。
+        source: Key 的来源，取值 ``env_file`` / ``system_env`` / 空串（未配置）。
     """
 
     env_var: str
     is_configured: bool
     masked_value: str
+    source: str = ""
 
 
 def mask_secret(value: str, *, tail_length: int = _SECRET_TAIL_LENGTH) -> str:
@@ -109,15 +120,78 @@ def load_api_key_statuses(
     env_file_values = read_env_values(workspace_root)
     statuses: list[ApiKeyStatus] = []
     for env_var in sorted({str(name).strip() for name in env_vars if str(name).strip()}):
-        effective_value = os.environ.get(env_var) or env_file_values.get(env_var) or ""
+        env_file_value = str(env_file_values.get(env_var) or "").strip()
+        process_value = str(os.environ.get(env_var) or "").strip()
+        effective_value = process_value or env_file_value
+        if env_file_value and env_file_value == process_value:
+            source = _SOURCE_ENV_FILE
+        elif effective_value:
+            source = _SOURCE_SYSTEM_ENV
+        else:
+            source = ""
         statuses.append(
             ApiKeyStatus(
                 env_var=env_var,
                 is_configured=bool(effective_value),
                 masked_value=mask_secret(effective_value),
+                source=source,
             )
         )
     return tuple(statuses)
+
+
+def describe_api_key_status(status: ApiKeyStatus) -> str:
+    """把 Key 状态渲染成一行可读文案。
+
+    参数:
+        status: 单个 Key 的状态。
+
+    返回值:
+        形如 ``✅ 已配置（.env …a1b2）`` 或 ``⚠ 未配置`` 的文案。
+
+    异常:
+        无。
+    """
+
+    if not status.is_configured:
+        return "⚠ 未配置"
+    source_label = _SOURCE_LABELS.get(status.source, "")
+    if source_label:
+        return f"✅ 已配置（{source_label} {status.masked_value}）"
+    return f"✅ 已配置（{status.masked_value}）"
+
+
+def describe_scene_key_usage(
+    option: ModelOption,
+    key_statuses: Sequence[ApiKeyStatus],
+) -> str:
+    """描述某个模型实际使用的是哪些 Key 及其配置状态。
+
+    参数:
+        option: 当前 scene 选中的模型选项。
+        key_statuses: 全部 Key 的状态列表。
+
+    返回值:
+        单行文案；无引用的 Key 时返回空串。
+
+    异常:
+        无。
+    """
+
+    status_index = {status.env_var: status for status in key_statuses}
+    parts: list[str] = []
+    for env_var in option.required_env_vars:
+        status = status_index.get(env_var)
+        if status is None:
+            parts.append(f"{env_var} ⚠ 未配置")
+            continue
+        if status.is_configured:
+            source_label = _SOURCE_LABELS.get(status.source, "")
+            suffix = f"（{source_label} {status.masked_value}）" if source_label else ""
+            parts.append(f"{env_var} ✅{suffix}")
+        else:
+            parts.append(f"{env_var} ⚠ 未配置")
+    return " · ".join(parts)
 
 
 def scene_session_key(scene_name: str) -> str:
@@ -290,8 +364,7 @@ def _render_api_key_tab(
     for status in statuses:
         name_col, input_col, clear_col = st.columns([1.2, 2.4, 0.6])
         with name_col:
-            state_text = f"已配置 `{status.masked_value}`" if status.is_configured else "未配置"
-            st.markdown(f"**{status.env_var}**  \n{state_text}")
+            st.markdown(f"**{status.env_var}**  \n{describe_api_key_status(status)}")
         with input_col:
             entered_values[status.env_var] = st.text_input(
                 status.env_var,
@@ -408,16 +481,20 @@ def _render_model_config_dialog(
             )
             if option is None or option.is_allowed:
                 continue
-            manifest_changed = (
-                ensure_scene_model_allowed(
-                    workspace_root=workspace_root,
-                    config_dirs=config_dirs,
-                    scene_name=scene_name,
-                    model_name=selected_name,
-                )
-                or manifest_changed
+            written_scenes = ensure_scene_model_allowed_in_scope(
+                workspace_root=workspace_root,
+                config_dirs=config_dirs,
+                scene_name=scene_name,
+                model_name=selected_name,
             )
-    except (OSError, ValueError) as exc:
+            if written_scenes:
+                manifest_changed = True
+                Log.info(
+                    f"已为 scene={scene_name} 放行模型 {selected_name}: "
+                    f"写入 {', '.join(written_scenes)}",
+                    module=MODULE,
+                )
+    except (OSError, TypeError, ValueError) as exc:
         st.error(f"保存失败: {exc}")
         return
 
@@ -457,6 +534,10 @@ def render_model_panel(
 
     st.sidebar.markdown("**🤖 模型**")
 
+    key_statuses = load_api_key_statuses(
+        workspace_root=workspace_root,
+        env_vars=api_key_env_vars,
+    )
     selections: dict[str, str] = {}
     for scene_name, options in options_by_scene.items():
         label = _SCENE_LABELS.get(scene_name, scene_name)
@@ -474,13 +555,13 @@ def render_model_panel(
             notes.append("未放行")
         suffix = f" {' · '.join(notes)}" if notes else ""
         st.sidebar.caption(f"{label}：`{selected_name}`{suffix}")
+        key_usage = describe_scene_key_usage(selected_option, key_statuses)
+        if key_usage:
+            st.sidebar.caption(f"　Key：{key_usage}")
 
-    configured_count = sum(
-        1 for status in load_api_key_statuses(workspace_root=workspace_root, env_vars=api_key_env_vars)
-        if status.is_configured
-    )
+    configured_count = sum(1 for status in key_statuses if status.is_configured)
     if api_key_env_vars:
-        st.sidebar.caption(f"API Key：已配置 {configured_count} / {len(set(api_key_env_vars))}")
+        st.sidebar.caption(f"API Key：已配置 {configured_count} / {len({str(name) for name in api_key_env_vars})}")
 
     if st.sidebar.button("⚙ 模型与 API Key", key="open_model_config_btn", width="stretch"):
         _render_model_config_dialog(

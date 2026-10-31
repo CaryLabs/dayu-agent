@@ -797,6 +797,69 @@ class DefaultHostExecutor(HostExecutorProtocol):
         finally:
             self._finish_run(bridge=bridge, deadline_watcher=deadline_watcher, permits=permits, run_id=run.run_id)
 
+    def _discard_terminal_pending_turn_if_any(
+        self,
+        *,
+        session_id: str,
+        scene_name: str,
+    ) -> None:
+        """清理指定 session/scene 下关联 run 已终态的残留 pending turn。
+
+        残留来源：resumable scene 失败/超时后，``should_delete_pending_turn_after_terminal_run``
+        判为保留（等待 UI 触发 resume 询问）。但 Web 交互问答的重提交是「重新提问」
+        而非 resume，此时旧 turn 只会阻塞新 turn 的登记——``upsert`` 会因 user_text
+        不同抛出「已存在活跃 pending turn」。故在登记 accepted 真源前，主动清除已
+        失效的旧 turn；关联 run 仍活跃时严格保留，交由 ``upsert`` 的并发保护拒绝
+        写入，避免误删执行中 run 的恢复真源。
+
+        参数:
+            session_id: 会话标识。
+            scene_name: 场景名。
+
+        返回值:
+            无。
+
+        异常:
+            无。查询/删除失败仅记录日志，不阻断登记主流程。
+        """
+
+        if self.pending_turn_store is None:
+            return
+        try:
+            existing = self.pending_turn_store.get_session_pending_turn(
+                session_id=session_id,
+                scene_name=scene_name,
+            )
+        except Exception as exc:  # noqa: BLE001 - 清理为尽力而为，失败不阻断登记
+            Log.verbose(
+                f"查询残留 pending turn 失败，跳过清理: "
+                f"session_id={session_id}, scene_name={scene_name}, error={exc}",
+                module=MODULE,
+            )
+            return
+        if existing is None:
+            return
+        source_run: RunRecord | None
+        try:
+            source_run = self.run_registry.get_run(existing.source_run_id)
+        except Exception as exc:  # noqa: BLE001 - 查不到按孤儿处理，仍清理
+            Log.verbose(
+                f"查询 pending turn 源 run 失败，按孤儿清理: "
+                f"pending_turn_id={existing.pending_turn_id}, error={exc}",
+                module=MODULE,
+            )
+            source_run = None
+        if source_run is not None and not source_run.is_terminal():
+            return
+        self._delete_pending_turn(existing.pending_turn_id)
+        Log.verbose(
+            f"清理已终态残留 pending turn，允许重新登记: "
+            f"pending_turn_id={existing.pending_turn_id}, "
+            f"session_id={session_id}, scene_name={scene_name}, "
+            f"source_run_state={source_run.state.value if source_run is not None else 'missing'}",
+            module=MODULE,
+        )
+
     def _register_accepted_pending_turn(
         self,
         *,
@@ -812,6 +875,13 @@ class DefaultHostExecutor(HostExecutorProtocol):
         user_text = str(execution_contract.message_inputs.user_message or "").strip()
         if not bool(execution_contract.host_policy.resumable) or not session_id or not scene_name or not user_text:
             return None
+        # 「重新提问」语义：清理该 session/scene 下关联 run 已终态的残留 pending
+        # turn，避免失败/超时残留阻塞新 turn 登记（否则 upsert 会抛「已存在活跃
+        # pending turn，不能写入不同 user_text」）。
+        self._discard_terminal_pending_turn_if_any(
+            session_id=session_id,
+            scene_name=scene_name,
+        )
         accepted_turn = _build_accepted_turn_snapshot(execution_contract)
         accepted_turn_json = json.dumps(
             serialize_accepted_agent_turn_snapshot(accepted_turn),

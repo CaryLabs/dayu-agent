@@ -275,6 +275,36 @@ def main() -> None:
     workspace_root = _resolve_workspace_root()
     workspace_root.mkdir(parents=True, exist_ok=True)
 
+    # 启动自检：外部环境变量（系统/用户级）与工作区 .env 的 Key 冲突检测。
+    # 以 .env 为准；发现冲突时在界面告警并落日志，避免「界面改了 Key 却仍用旧值」的混淆。
+    from dayu.log import Log
+    from dayu.web.env_file import detect_env_key_conflicts
+
+    env_conflicts = detect_env_key_conflicts(workspace_root)
+    if env_conflicts:
+        lines: list[str] = []
+        for c in env_conflicts:
+            if c.source in ("系统级环境变量", "用户级环境变量"):
+                advice = "请在 Windows「环境变量」设置中删除该变量"
+            else:
+                advice = "重启服务后，进程继承的旧值即被清除"
+            lines.append(
+                f"- `{c.key}`：{c.source}（…{c.external_tail}）≠ .env（…{c.env_tail}）→ {advice}"
+            )
+        st.warning(
+            "⚠️ 检测到外部环境变量与工作区 `.env` 的 API Key 不一致，系统以 `.env` 为准：\n\n"
+            + "\n".join(lines)
+        )
+        # 仅在冲突集合变化时写日志，避免每次页面交互重复刷日志。
+        signature = tuple((c.key, c.source, c.external_tail) for c in env_conflicts)
+        if st.session_state.get("_env_conflict_signature") != signature:
+            st.session_state["_env_conflict_signature"] = signature
+            Log.warning(
+                f"启动自检发现 {len(env_conflicts)} 处环境变量冲突（以 .env 为准）: "
+                + "；".join(f"{c.key}({c.source}:{c.external_tail})" for c in env_conflicts),
+                module=MODULE,
+            )
+
     # 第一步：配置入口先落地，保证任何情况下都能进界面改配置
     config_context = build_config_context(workspace_root)
     if config_context is None:
