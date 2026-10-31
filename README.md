@@ -52,35 +52,35 @@
 命令格式：
 
 ```bash
-python -m pip install https://github.com/noho/dayu-agent/releases/download/<version>/dayu_agent-<version>-py3-none-any.whl
+python -m pip install https://github.com/CaryLabs/dayu-agent/releases/download/<version>/dayu_agent-<version>-py3-none-any.whl
 ```
 
 示例（替换为最新版本号）：
 
 ```bash
-python -m pip install https://github.com/noho/dayu-agent/releases/download/v0.1.4/dayu_agent-0.1.4-py3-none-any.whl
+python -m pip install https://github.com/CaryLabs/dayu-agent/releases/download/v0.1.4/dayu_agent-0.1.4-py3-none-any.whl
 ```
 
-这种方式最轻，但安装耗时和成功率会受网络、平台和上游依赖发布状态影响。最新稳定版请以 [Releases](https://github.com/noho/dayu-agent/releases) 页面为准，复制对应版本的 wheel URL。
+这种方式最轻，但安装耗时和成功率会受网络、平台和上游依赖发布状态影响。最新稳定版请以 [Releases](https://github.com/CaryLabs/dayu-agent/releases) 页面为准，复制对应版本的 wheel URL。
 
 如需安装 `main` 分支开发版（nightly），可以直接从 Git 安装：
 
 ```bash
-python -m pip install --upgrade --force-reinstall "git+https://github.com/noho/dayu-agent.git@main"
+python -m pip install --upgrade --force-reinstall "git+https://github.com/CaryLabs/dayu-agent.git@main"
 ```
 
 也可以使用 `uv tool` 安装，让 `uv` 独立管理工具环境和 Python 3.11。`uv` 的安装方法请参考 [uv 官方安装文档](https://docs.astral.sh/uv/getting-started/installation/)。
 
 ```bash
 uv tool install --force --managed-python --python 3.11 \
-  "dayu-agent @ https://github.com/noho/dayu-agent/releases/download/<version>/dayu_agent-<version>-py3-none-any.whl"
+  "dayu-agent @ https://github.com/CaryLabs/dayu-agent/releases/download/<version>/dayu_agent-<version>-py3-none-any.whl"
 ```
 
 安装 `main` 分支开发版（nightly）：
 
 ```bash
 uv tool install --force --refresh --managed-python --python 3.11 \
-  "git+https://github.com/noho/dayu-agent.git@main"
+  "git+https://github.com/CaryLabs/dayu-agent.git@main"
 ```
 
 `uv tool install --force` 会替换已有的同名 `dayu-agent` 工具环境，但不会覆盖已有工作区数据和配置。安装后可用以下命令查看安装来源：
@@ -91,7 +91,7 @@ uv tool list --show-version-specifiers --show-python
 
 #### 1.1.2 离线安装
 
-从 [Releases](https://github.com/noho/dayu-agent/releases) 页面下载对应平台的离线安装包：
+从 [Releases](https://github.com/CaryLabs/dayu-agent/releases) 页面下载对应平台的离线安装包：
 
 - Mac ARM芯片：`dayu-agent-<version>-macos-arm64-offline.tar.gz`
 - Mac Intel芯片：`dayu-agent-<version>-macos-x64-offline.tar.gz`

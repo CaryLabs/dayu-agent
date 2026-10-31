@@ -136,9 +136,9 @@
 - 财报电话会议音频转录后的问答区分未实现。
 - 定性分析模板对不同公司的差异化判断路径仍偏机械。
 
-[Unreleased]: https://github.com/noho/dayu-agent/compare/v0.1.4...HEAD
-[0.1.4]: https://github.com/noho/dayu-agent/releases/tag/v0.1.4
-[0.1.3]: https://github.com/noho/dayu-agent/releases/tag/v0.1.3
-[0.1.2]: https://github.com/noho/dayu-agent/releases/tag/v0.1.2
-[0.1.1]: https://github.com/noho/dayu-agent/releases/tag/v0.1.1
-[0.1.0]: https://github.com/noho/dayu-agent/releases/tag/v0.1.0
+[Unreleased]: https://github.com/CaryLabs/dayu-agent/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/CaryLabs/dayu-agent/releases/tag/v0.1.4
+[0.1.3]: https://github.com/CaryLabs/dayu-agent/releases/tag/v0.1.3
+[0.1.2]: https://github.com/CaryLabs/dayu-agent/releases/tag/v0.1.2
+[0.1.1]: https://github.com/CaryLabs/dayu-agent/releases/tag/v0.1.1
+[0.1.0]: https://github.com/CaryLabs/dayu-agent/releases/tag/v0.1.0

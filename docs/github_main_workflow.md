@@ -5,7 +5,7 @@
 - 开源之后的日常开发、贡献、同步流程。
 
 核心假设：
-- GitHub 远端名：`github`，地址 `git@github.com:noho/dayu-agent.git`。
+- GitHub 远端名：`github`，地址 `git@github.com:CaryLabs/dayu-agent.git`。
 - 局域网 Gitea 远端名：`lan`。
 - 本地曾经以 `lan-main` 作为主线，有大量非公开开发历史。
 
@@ -112,7 +112,7 @@ git push lan main:main
 
 ### 第 5 步：GitHub 仓库设置（网页操作）
 
-去 `github.com/noho/dayu-agent` 的 Settings → General：
+去 `github.com/CaryLabs/dayu-agent` 的 Settings → General：
 - **Default branch** 设为 `main`。
 - Settings → Branches → Add branch protection rule：
   - Branch name pattern：`main`
@@ -192,7 +192,7 @@ gh pr create --fill          # 或去网页开
 
 查看 CI 状态：
 ```bash
-gh pr checks https://github.com/noho/dayu-agent/pull/<PR号> --watch
+gh pr checks https://github.com/CaryLabs/dayu-agent/pull/<PR号> --watch
 ```
 
 如果想让 CI 额外跑扩展集成测试和 PR 可执行的平台完整验证：

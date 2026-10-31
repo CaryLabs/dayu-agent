@@ -1,18 +1,18 @@
 ## 安装
 
 ```bash
-pip install https://github.com/noho/dayu-agent/releases/download/v0.1.4/dayu_agent-0.1.4-py3-none-any.whl
+pip install https://github.com/CaryLabs/dayu-agent/releases/download/v0.1.4/dayu_agent-0.1.4-py3-none-any.whl
 ```
 
 ## 更新到新版本
 
 ```bash
-pip install --upgrade https://github.com/noho/dayu-agent/releases/download/v0.1.4/dayu_agent-0.1.4-py3-none-any.whl
+pip install --upgrade https://github.com/CaryLabs/dayu-agent/releases/download/v0.1.4/dayu_agent-0.1.4-py3-none-any.whl
 ```
 
 ## 离线安装
 
-从 [Releases](https://github.com/noho/dayu-agent/releases) 页面下载对应平台的离线安装包：
+从 [Releases](https://github.com/CaryLabs/dayu-agent/releases) 页面下载对应平台的离线安装包：
 
 - Mac ARM芯片：`dayu-agent-0.1.4-macos-arm64-offline.tar.gz`
 - Mac Intel芯片：`dayu-agent-0.1.4-macos-x64-offline.tar.gz`

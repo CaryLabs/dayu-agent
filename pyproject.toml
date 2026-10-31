@@ -89,9 +89,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/noho/dayu-agent"
-Repository = "https://github.com/noho/dayu-agent"
-Issues = "https://github.com/noho/dayu-agent/issues"
+Homepage = "https://github.com/CaryLabs/dayu-agent"
+Repository = "https://github.com/CaryLabs/dayu-agent"
+Issues = "https://github.com/CaryLabs/dayu-agent/issues"
 
 [project.scripts]
 dayu-cli = "dayu.cli.main:main"
