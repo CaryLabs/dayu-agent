@@ -174,7 +174,7 @@ def _render_message_history(messages: list[ChatMessage]) -> None:
                     st.markdown(message.content)
 
 
-def _render_stream_frame(*, title, state: ChatStreamFrameState) -> None:
+def render_stream_frame(*, title, state: ChatStreamFrameState) -> None:
     """渲染当前流式帧的思考与正文。
 
     参数:
@@ -368,8 +368,7 @@ def _render_stream_polling_fragment(
     assistant_column, _ = st.columns(_ASSISTANT_MESSAGE_COLUMN_SPEC, gap="small")
     with assistant_column:
         with st.chat_message("assistant"):
-            _render_stream_frame(title=_THINKING_EXPANDER_TITLE, state=stream_state)
-
+            render_stream_frame(title=_THINKING_EXPANDER_TITLE, state=stream_state)
     if not stream_state.done:
         return
 
@@ -422,8 +421,21 @@ def render_chat_tab(
     *,
     selected_stock: WatchlistItem,
     chat_service: ChatServiceProtocol | None = None,
+    model_name: str | None = None,
 ) -> None:
-    """渲染交互式分析 Tab。"""
+    """渲染交互式分析 Tab。
+
+    参数:
+        selected_stock: 当前选中的自选股。
+        chat_service: 聊天服务协议实例；为空时禁用提问。
+        model_name: 本轮使用的模型名；为空时沿用 scene 默认模型。
+
+    返回值:
+        无。
+
+    异常:
+        无。
+    """
 
     ticker = selected_stock.ticker
     message_state_key = _build_state_key(ticker, "messages")
@@ -525,15 +537,21 @@ def render_chat_tab(
         messages.append(ChatMessage(role="user", content=normalized_user_text))
         session_id = build_chat_session_id(ticker)
         Log.info(
-            f"[{trace_id}] 开始请求流式回复: ticker={ticker}, session_id={session_id}",
+            f"[{trace_id}] 开始请求流式回复: ticker={ticker}, session_id={session_id}, "
+            f"model_name={model_name or '<scene-default>'}",
             module=MODULE,
         )
-        start_chat_stream_runtime(
+        started = start_chat_stream_runtime(
             chat_service=chat_service,
             ticker=ticker,
             user_text=normalized_user_text,
             session_id=session_id,
             trace_id=trace_id,
             stream_state_key=stream_state_key,
+            model_name=model_name,
         )
+        if not started:
+            messages.pop()
+            st.warning("当前股票已有一轮分析正在进行，请等待完成后再提交。")
+            return
         st.rerun()

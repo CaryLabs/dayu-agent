@@ -15,6 +15,7 @@ from typing import Literal
 import streamlit as st
 
 from dayu.contracts.events import AppEvent, AppEventType
+from dayu.contracts.execution_options import ExecutionOptions
 from dayu.log import Log
 from dayu.services.contracts import ChatTurnRequest, SessionResolutionPolicy
 from dayu.services.protocols import ChatServiceProtocol
@@ -69,6 +70,7 @@ class ChatStreamRuntimeHandle:
     started_at: float
     last_chunk_at: float
     has_received_chunk: bool
+    ticker: str
 
 
 CHAT_STREAM_RUNTIME_HANDLES: dict[str, ChatStreamRuntimeHandle] = {}
@@ -83,6 +85,7 @@ async def consume_chat_event_stream(
     event_queue: Queue[StreamQueueItem],
     cancel_event: threading.Event,
     trace_id: str,
+    model_name: str | None = None,
 ) -> None:
     """异步消费聊天事件流并写入线程队列。
 
@@ -94,6 +97,7 @@ async def consume_chat_event_stream(
         event_queue: 线程安全队列，用于向主线程投递流式事件。
         cancel_event: 取消信号事件；主线程设置后协程应尽快退出。
         trace_id: 请求链路追踪标识。
+        model_name: 本轮请求覆盖的模型名；为空时沿用 scene 默认模型。
 
     返回值:
         无。
@@ -105,13 +109,17 @@ async def consume_chat_event_stream(
     request_started_at = time.perf_counter()
     Log.info(
         f"[{trace_id}] 提交聊天请求: ticker={ticker}, has_session={bool(session_id)}, "
+        f"model_name={model_name or '<scene-default>'}, "
         f"user_text_summary={summarize_user_text(user_text)}",
         module=MODULE,
     )
+    normalized_model_name = str(model_name or "").strip()
+    execution_options = ExecutionOptions(model_name=normalized_model_name) if normalized_model_name else None
     request = ChatTurnRequest(
         user_text=user_text,
         session_id=session_id,
         ticker=ticker,
+        execution_options=execution_options,
         scene_name=_SCENE_NAME_INTERACTIVE,
         session_resolution_policy=SessionResolutionPolicy.ENSURE_DETERMINISTIC,
     )
@@ -223,6 +231,7 @@ def run_stream_worker(
     event_queue: Queue[StreamQueueItem],
     cancel_event: threading.Event,
     trace_id: str,
+    model_name: str | None = None,
 ) -> None:
     """在线程中运行异步事件消费协程。
 
@@ -234,6 +243,7 @@ def run_stream_worker(
         event_queue: 线程安全队列，用于向主线程投递流式事件。
         cancel_event: 取消信号事件；接收后应尽快停止消费。
         trace_id: 请求链路追踪标识。
+        model_name: 本轮请求覆盖的模型名；为空时沿用 scene 默认模型。
 
     返回值:
         无。
@@ -252,6 +262,7 @@ def run_stream_worker(
                 event_queue=event_queue,
                 cancel_event=cancel_event,
                 trace_id=trace_id,
+                model_name=model_name,
             )
         )
     except BaseException as exception:  # noqa: BLE001
@@ -331,7 +342,7 @@ def clear_chat_stream_runtime(*, ticker: str, stream_state_key: str) -> None:
         无。
     """
 
-    runtime = CHAT_STREAM_RUNTIME_HANDLES.pop(ticker, None)
+    runtime = CHAT_STREAM_RUNTIME_HANDLES.pop(stream_state_key, None)
     if runtime is not None:
         if runtime.worker.is_alive():
             runtime.cancel_event.set()
@@ -342,6 +353,33 @@ def clear_chat_stream_runtime(*, ticker: str, stream_state_key: str) -> None:
         del st.session_state[stream_state_key]
 
 
+def active_stream_state_key(ticker: str) -> str | None:
+    """返回指定股票当前正在运行的分析流状态键。
+
+    同一股票允许多个不同入口（交互式分析与上传后自动解读）使用不同
+    ``stream_state_key``，但同一时刻只应有一个流在跑：``ChatService`` 的会话锁是
+    ``asyncio.Lock``，而每个 worker 各自调用 ``asyncio.run`` 拥有独立事件循环，
+    跨循环等待会直接抛错。因此互斥必须在 UI 侧、在单一入口完成。
+
+    参数:
+        ticker: 股票代码。
+
+    返回值:
+        正在运行的流状态键；没有活跃流时返回 ``None``。
+
+    异常:
+        无。
+    """
+
+    active_key: str | None = None
+    for state_key, handle in CHAT_STREAM_RUNTIME_HANDLES.items():
+        if handle.ticker != ticker:
+            continue
+        if handle.worker.is_alive():
+            active_key = state_key
+    return active_key
+
+
 def start_chat_stream_runtime(
     *,
     chat_service: ChatServiceProtocol,
@@ -350,8 +388,11 @@ def start_chat_stream_runtime(
     session_id: str,
     trace_id: str,
     stream_state_key: str,
-) -> None:
+    model_name: str | None = None,
+) -> bool:
     """启动聊天流式 worker 并初始化渲染帧状态。
+
+    同一股票已有活跃流时直接拒绝启动，避免同 session 并发进入 ``ChatService``。
 
     参数:
         chat_service: 聊天服务协议实例。
@@ -359,14 +400,24 @@ def start_chat_stream_runtime(
         user_text: 用户输入文本。
         session_id: 会话标识。
         trace_id: 请求追踪标识。
-        stream_state_key: 会话状态键。
+        stream_state_key: 会话状态键；不同入口应使用不同键以避免帧状态互相覆盖。
+        model_name: 本轮覆盖的模型名；为空时沿用 scene 默认模型。
 
     返回值:
-        无。
+        真正启动返回 ``True``；因同股票已有活跃流而拒绝时返回 ``False``。
 
     异常:
         无。
     """
+
+    active_key = active_stream_state_key(ticker)
+    if active_key is not None and active_key != stream_state_key:
+        Log.warning(
+            f"[{trace_id}] 拒绝启动流式 worker：同股票已有活跃流, ticker={ticker}, "
+            f"active_key={active_key}",
+            module=MODULE,
+        )
+        return False
 
     clear_chat_stream_runtime(ticker=ticker, stream_state_key=stream_state_key)
     event_queue: Queue[StreamQueueItem] = Queue()
@@ -381,24 +432,28 @@ def start_chat_stream_runtime(
             "event_queue": event_queue,
             "cancel_event": cancel_event,
             "trace_id": trace_id,
+            "model_name": model_name,
         },
         daemon=True,
     )
     started_at = time.perf_counter()
-    CHAT_STREAM_RUNTIME_HANDLES[ticker] = ChatStreamRuntimeHandle(
+    CHAT_STREAM_RUNTIME_HANDLES[stream_state_key] = ChatStreamRuntimeHandle(
         worker=worker,
         event_queue=event_queue,
         cancel_event=cancel_event,
         started_at=started_at,
         last_chunk_at=started_at,
         has_received_chunk=False,
+        ticker=ticker,
     )
     st.session_state[stream_state_key] = new_stream_frame_state(trace_id=trace_id, session_id=session_id)
     worker.start()
     Log.info(
-        f"[{trace_id}] 启动流式 worker: ticker={ticker}, session_id={session_id}",
+        f"[{trace_id}] 启动流式 worker: ticker={ticker}, session_id={session_id}, "
+        f"model_name={model_name or '<scene-default>'}",
         module=MODULE,
     )
+    return True
 
 
 def poll_chat_stream_events(*, ticker: str, stream_state_key: str) -> ChatStreamFrameState | None:
@@ -419,7 +474,7 @@ def poll_chat_stream_events(*, ticker: str, stream_state_key: str) -> ChatStream
     if state is None:
         return None
 
-    runtime = CHAT_STREAM_RUNTIME_HANDLES.get(ticker)
+    runtime = CHAT_STREAM_RUNTIME_HANDLES.get(stream_state_key)
     if runtime is None:
         state.done = True
         if not state.error_message:
