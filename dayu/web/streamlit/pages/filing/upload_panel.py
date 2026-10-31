@@ -52,6 +52,10 @@ _TASK_STATE_KEY_TEMPLATE = "upload_task_{ticker}"
 _UPLOADER_KEY_TEMPLATE = "upload_files_{ticker}_{generation}"
 _UPLOADER_GENERATION_KEY_TEMPLATE = "upload_generation_{ticker}"
 _PENDING_ANALYSIS_KEY = "pending_upload_analysis"
+#: 记录「哪个 ticker 的上传刚刚结束」。
+#: 上传状态轮询跑在 ``st.fragment`` 内，只会重跑 fragment 本身；
+#: 财报列表与上传后自动解读都在整页脚本里，因此任务结束时必须显式触发整页重跑。
+_REFRESH_PENDING_KEY = "upload_refresh_pending_ticker"
 
 _FISCAL_PERIOD_OPTIONS: tuple[str, ...] = ("FY", "Q1", "Q2", "Q3", "Q4", "H1")
 _MIN_FISCAL_YEAR = 1990
@@ -381,6 +385,7 @@ def poll_upload_tasks() -> None:
             )
         if finished:
             registry.pop(ticker, None)
+            st.session_state[_REFRESH_PENDING_KEY] = ticker
             continue
         if not runtime.worker.is_alive():
             registry.pop(ticker, None)
@@ -407,7 +412,7 @@ def _render_task_status(ticker: str) -> None:
         st.info(f"正在上传并解析 {len(state.file_names)} 个文件，已耗时 {elapsed_seconds} 秒。大文件可能需要数分钟。")
         return
     if state.status == _STATUS_COMPLETED:
-        st.success(f"上传完成：{state.message}")
+        st.success(state.message or "上传完成")
         return
     st.error(f"上传失败：{state.message}")
 
@@ -431,6 +436,25 @@ def _resolve_fragment_factory() -> _FragmentDecoratorFactory | None:
     return None
 
 
+def _consume_refresh_flag(ticker: str) -> bool:
+    """消费「上传刚结束」标记，判断是否需要整页重跑。
+
+    参数:
+        ticker: 股票代码。
+
+    返回值:
+        标记命中当前股票时返回 ``True``，并在返回前清除标记（保证只重跑一次）。
+
+    异常:
+        无。
+    """
+
+    if st.session_state.get(_REFRESH_PENDING_KEY) != ticker:
+        return False
+    st.session_state.pop(_REFRESH_PENDING_KEY, None)
+    return True
+
+
 def render_upload_status_with_optional_polling(ticker: str) -> None:
     """渲染上传状态，运行中时启用自动轮询。
 
@@ -445,6 +469,8 @@ def render_upload_status_with_optional_polling(ticker: str) -> None:
     """
 
     poll_upload_tasks()
+    if _consume_refresh_flag(ticker):
+        st.rerun()
     if not is_running(ticker):
         _render_task_status(ticker)
         return
@@ -459,6 +485,8 @@ def render_upload_status_with_optional_polling(ticker: str) -> None:
         """在上传进行中周期刷新状态。"""
 
         poll_upload_tasks()
+        if _consume_refresh_flag(ticker):
+            st.rerun()
         _render_task_status(ticker)
 
     _upload_status_fragment()

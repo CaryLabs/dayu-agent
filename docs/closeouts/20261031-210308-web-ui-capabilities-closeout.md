@@ -83,3 +83,36 @@
 | 4 | `.env` 明文 Key | 仅写工作区 `config/.env`；需确认部署时不入库、不随镜像分发 |
 | 5 | 后端契约漂移 | 成功状态集、模板路径、推断组合策略在 UI 与 CLI 各一份；若后续允许改后端应上移为公共函数 |
 | 6 | 全量回归 | 因依赖安装失败，未跑全仓 `pytest`；合并前建议在完整环境补一次 |
+
+## 5. 本地真机验证（2026-10-31 晚，补充）
+
+在隔离 venv（Python 3.12 / Streamlit 1.66.1 / docling 2.145.0 / torch 2.8.0+cpu）下真实启动
+`streamlit run`，用 Chromium 驱动逐项点检，并配合 `AppTest` 无头执行整页脚本。
+
+| # | 验证项 | 结果 |
+| --- | --- | --- |
+| 1 | 整页装配与三 Tab 渲染 | 0 异常；`AppTest` 与真浏览器一致 |
+| 2 | 模型清单读取 | 读到真实模型 `mimo-v2.5-pro-thinking-plan` / `mimo-v2.5-pro-plan`，并正确标注缺少 `MIMO_PLAN_API_KEY` |
+| 3 | 模型配置对话框 | 2 个 scene 下拉、缺 Key 标记、默认标记、动态 Key 输入框齐全 |
+| 4 | 填 Key → 保存 | 写入 `workspace/config/.env`；侧边栏「⚠ 缺少 Key」立即消失（验证了 v2 审核结论：env 替换在每次 `load_llm_model` 发生，无需缓存失效） |
+| 5 | 上传元数据推断 | `AAPL_2024_10-K.md` → 财年 2024 / 财期 FY，依据文件名，无需手改 |
+| 6 | 上传 + docling 解析 | 15 秒完成；生成 `filing_manifest.json`、`*_docling.json`、`meta.json`；列表显示「可用」 |
+| 7 | 上传后自动解读 | 触发并在「交互式分析」Tab 读到该轮提问，验证了跨 Tab 会话共享 |
+| 8 | 失败路径 | 未装 docling 时给出「上传失败: Docling 未安装…」明确提示，不崩溃 |
+
+### 验证中发现并修复的缺陷
+
+**F1（已修）：上传完成后列表与自动解读不刷新。**
+上传状态轮询跑在 `st.fragment` 内，`st.rerun()` 默认 `scope="app"`，但原实现只在 fragment 内
+`poll_upload_tasks()` 更新状态，从不触发整页重跑，导致同一会话内：财报列表仍显示「暂无财报」、
+`_render_auto_analysis` 也从未执行（两者都在整页脚本里）。新增 `_REFRESH_PENDING_KEY` 标记，
+由 `poll_upload_tasks()` 在任务结束时置位、`render_upload_status_with_optional_polling()` 消费后
+`st.rerun()`；标记一次性消费，避免整页重跑死循环。新增 3 个单测覆盖命中/他股/无标记三种分支。
+
+**F2（已修）：成功文案重复为「上传完成：上传完成」。** 改为直接展示后端返回的 message。
+
+### 仍未验证
+
+- 真实 LLM 调用：无可用 Key，自动解读只到「发出请求」为止，助手消息为空且**无显式错误提示**
+  （属既有 chat 渲染链路行为，非本次改动）。建议有 Key 后重跑一遍，并考虑在无 Key 时前置拦截。
+
