@@ -101,8 +101,8 @@ def _build_manifest(*, allowed: list[str], default: str) -> SceneManifestAsset:
 
 
 @pytest.mark.unit
-def test_load_scene_model_options_filters_and_marks_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """只保留真实存在的模型，并标记默认项。"""
+def test_load_scene_model_options_lists_all_models_with_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """列举 llm_models.json 的全部模型，并用 is_allowed 标注放行状态。"""
     monkeypatch.delenv("DAYU_MODEL_KEY_A", raising=False)
     monkeypatch.setenv("DAYU_MODEL_KEY_B", "set")
     config_loader = _FakeConfigLoader(
@@ -119,13 +119,37 @@ def test_load_scene_model_options_filters_and_marks_default(monkeypatch: pytest.
         scene_name="interactive",
     )
 
-    assert [option.name for option in options] == ["model-a", "model-b"]
+    # 排序：默认 → 已放行 → 其余；清单里不存在的 allowed 名称自然被排除
+    assert [option.name for option in options] == ["model-a", "model-b", "model-c"]
     assert options[0].is_default is True
+    assert options[0].is_allowed is True
     assert options[1].is_default is False
+    assert options[1].is_allowed is True
+    # 未在放行列表中的模型也必须出现在候选里，由界面负责补写放行
+    assert options[2].is_allowed is False
     assert options[0].missing_env_vars == ("DAYU_MODEL_KEY_A",)
     assert options[0].is_ready is False
     assert options[1].missing_env_vars == ()
     assert options[1].is_ready is True
+
+
+@pytest.mark.unit
+def test_load_scene_model_options_includes_model_outside_allowlist() -> None:
+    """放行列表之外但存在于模型清单的模型必须出现在候选里。"""
+
+    config_loader = _FakeConfigLoader(models={"allowed-model": {}, "extra-model": {}}, env_vars={})
+    prompt_store = _FakePromptAssetStore(
+        _build_manifest(allowed=["allowed-model"], default="allowed-model")
+    )
+
+    options = load_scene_model_options(
+        config_loader=config_loader,
+        prompt_asset_store=prompt_store,
+        scene_name="interactive",
+    )
+
+    assert [option.name for option in options] == ["allowed-model", "extra-model"]
+    assert options[1].is_allowed is False
 
 
 @pytest.mark.unit
@@ -162,8 +186,8 @@ def test_load_scene_model_options_returns_empty_on_invalid_manifest() -> None:
 def test_pick_effective_model_name_prefers_selection() -> None:
     """用户选择有效时应优先。"""
     options = (
-        ModelOption(name="a", is_default=True, missing_env_vars=()),
-        ModelOption(name="b", is_default=False, missing_env_vars=()),
+        ModelOption(name="a", is_default=True, is_allowed=True, missing_env_vars=()),
+        ModelOption(name="b", is_default=False, is_allowed=True, missing_env_vars=()),
     )
     assert pick_effective_model_name(options, "b") == "b"
 
@@ -172,8 +196,8 @@ def test_pick_effective_model_name_prefers_selection() -> None:
 def test_pick_effective_model_name_falls_back_to_default_then_first() -> None:
     """选择失效时回退默认，再回退首个。"""
     options = (
-        ModelOption(name="a", is_default=False, missing_env_vars=()),
-        ModelOption(name="b", is_default=True, missing_env_vars=()),
+        ModelOption(name="a", is_default=False, is_allowed=True, missing_env_vars=()),
+        ModelOption(name="b", is_default=True, is_allowed=True, missing_env_vars=()),
     )
     assert pick_effective_model_name(options, "missing") == "b"
     assert pick_effective_model_name((options[0],), "missing") == "a"

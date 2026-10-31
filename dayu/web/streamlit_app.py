@@ -24,9 +24,16 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import streamlit as st
+
+from dayu.web.streamlit.config_context import (
+    HOST_INIT_ERROR_KEY,
+    PREPARED_DEPS_KEY,
+    SERVICE_SESSION_KEYS,
+    build_config_context,
+)
 
 if TYPE_CHECKING:
     from dayu.services.protocols import (
@@ -35,6 +42,7 @@ if TYPE_CHECKING:
         WriteServiceProtocol,
     )
     from dayu.services.startup_preparation import PreparedHostRuntimeDependencies
+    from dayu.web.streamlit.config_context import WebConfigContext
     from dayu.web.streamlit.model_options import ModelOption
 
 MODULE = "WEB.STREAMLIT.APP"
@@ -124,15 +132,17 @@ def _resolve_services(
     from dayu.services.fins_service import FinsService
     from dayu.services.write_service import WriteService
 
-    if "fins_service" not in st.session_state:
-        st.session_state["fins_service"] = FinsService(
+    fins_key, chat_key, write_key = SERVICE_SESSION_KEYS
+
+    if fins_key not in st.session_state:
+        st.session_state[fins_key] = FinsService(
             host=prepared_deps.host,
             fins_runtime=prepared_deps.fins_runtime,
             session_source=SessionSource.WEB,
         )
 
-    if "chat_service" not in st.session_state:
-        st.session_state["chat_service"] = ChatService(
+    if chat_key not in st.session_state:
+        st.session_state[chat_key] = ChatService(
             host=prepared_deps.host,
             scene_execution_acceptance_preparer=prepared_deps.scene_execution_acceptance_preparer,
             default_scene_name="interactive",
@@ -140,8 +150,8 @@ def _resolve_services(
             session_source=SessionSource.WEB,
         )
 
-    if "write_service" not in st.session_state:
-        st.session_state["write_service"] = WriteService(
+    if write_key not in st.session_state:
+        st.session_state[write_key] = WriteService(
             host=prepared_deps.host,
             host_governance=prepared_deps.host,
             workspace=prepared_deps.workspace,
@@ -151,9 +161,9 @@ def _resolve_services(
         )
 
     return (
-        st.session_state["fins_service"],
-        st.session_state["chat_service"],
-        st.session_state["write_service"],
+        st.session_state[fins_key],
+        st.session_state[chat_key],
+        st.session_state[write_key],
     )
 
 
@@ -171,71 +181,155 @@ def _configure_streamlit_page() -> None:
 def _ensure_session_state_initialized() -> None:
     """初始化 Streamlit 会话状态默认键。"""
 
-    if "initialized" not in st.session_state:
-        st.session_state["initialized"] = False
-        st.session_state["prepared_deps"] = None
+    if PREPARED_DEPS_KEY not in st.session_state:
+        st.session_state[PREPARED_DEPS_KEY] = None
+    if HOST_INIT_ERROR_KEY not in st.session_state:
+        st.session_state[HOST_INIT_ERROR_KEY] = None
+
+
+def _ensure_host_runtime() -> PreparedHostRuntimeDependencies | None:
+    """获取 Host 运行时依赖，失败时记录原因而不是中断整页渲染。
+
+    成功结果缓存在会话状态中；失败后不再自动重试，直到用户点「重试初始化」或在
+    模型配置里保存 Key 后清除错误标记——避免每次交互都重复一次注定失败的装配。
+
+    参数:
+        无。
+
+    返回值:
+        装配成功时返回依赖集合；失败或处于「已失败待重试」状态时返回 ``None``。
+
+    异常:
+        无。装配异常被收敛为会话状态中的错误文本。
+    """
+
+    cached = st.session_state[PREPARED_DEPS_KEY]
+    if cached is not None:
+        return cast("PreparedHostRuntimeDependencies", cached)
+    if st.session_state.get(HOST_INIT_ERROR_KEY):
+        return None
+
+    try:
+        prepared_deps = _prepare_host_runtime()
+    except Exception as exc:  # noqa: BLE001 - 装配失败需降级为界面提示，保住配置入口
+        st.session_state[PREPARED_DEPS_KEY] = None
+        st.session_state[HOST_INIT_ERROR_KEY] = str(exc)
+        return None
+
+    st.session_state[PREPARED_DEPS_KEY] = prepared_deps
+    st.session_state[HOST_INIT_ERROR_KEY] = None
+    return prepared_deps
+
+
+def _build_model_options(config_context: WebConfigContext | None) -> dict[str, tuple[ModelOption, ...]]:
+    """按 scene 读取可选模型列表。
+
+    参数:
+        config_context: 轻量配置上下文；为 ``None`` 表示配置目录不可解析。
+
+    返回值:
+        scene 到候选模型的映射；上下文缺失时返回空映射。
+
+    异常:
+        无。单个 scene 解析失败由 ``load_scene_model_options`` 内部收敛为空元组。
+    """
+
+    from dayu.web.streamlit.components.model_panel import MODEL_SCENES
+    from dayu.web.streamlit.model_options import load_scene_model_options
+
+    if config_context is None:
+        return {}
+
+    return {
+        scene_name: load_scene_model_options(
+            config_loader=config_context.config_loader,
+            prompt_asset_store=config_context.prompt_asset_store,
+            scene_name=scene_name,
+        )
+        for scene_name in MODEL_SCENES
+    }
 
 
 def main() -> None:
-    """Streamlit 应用主入口。"""
+    """Streamlit 应用主入口。
 
-    from dayu.web.streamlit.components.model_panel import MODEL_SCENES, render_model_panel
+    渲染顺序刻意保证「配置入口先于重装配」：
+
+    1. 解析工作区，用轻量配置上下文渲染侧边栏（工作区信息、自选股、模型配置），
+       这条路不依赖 Host、SQLite、文档转换等重依赖；
+    2. 再尝试装配 Host 运行时。失败时只替换主功能区内容为错误与重试按钮，
+       已经渲染的侧边栏保持可用——用户可以就地补 API Key 或修配置，再重试。
+    """
+
+    from dayu.web.streamlit.components.model_panel import (
+        collect_missing_env_vars,
+        render_model_panel,
+    )
     from dayu.web.streamlit.components.sidebar import render_sidebar
-    from dayu.web.streamlit.model_options import load_scene_model_options
+    from dayu.web.streamlit.model_options import collect_all_model_env_vars
     from dayu.web.streamlit.pages.main_page import render_stock_detail_page, render_welcome_page
 
     _configure_streamlit_page()
     _ensure_session_state_initialized()
 
-    prepared_deps: PreparedHostRuntimeDependencies | None = st.session_state["prepared_deps"]
-
-    # 准备 Host 运行时依赖（只执行一次）
-    if not bool(st.session_state["initialized"]):
-        try:
-            prepared_deps = _prepare_host_runtime()
-            st.session_state["prepared_deps"] = prepared_deps
-            st.session_state["initialized"] = True
-        except Exception as exc:
-            st.error(f"服务初始化失败: {exc}")
-            st.stop()
-
     workspace_root = _resolve_workspace_root()
+    workspace_root.mkdir(parents=True, exist_ok=True)
 
-    model_options_by_scene: dict[str, tuple[ModelOption, ...]] = {}
-    if prepared_deps is not None:
-        for scene_name in MODEL_SCENES:
-            model_options_by_scene[scene_name] = load_scene_model_options(
-                config_loader=prepared_deps.workspace.config_loader,
-                prompt_asset_store=prepared_deps.workspace.prompt_asset_store,
-                scene_name=scene_name,
-            )
+    # 第一步：配置入口先落地，保证任何情况下都能进界面改配置
+    config_context = build_config_context(workspace_root)
+    if config_context is None:
+        st.sidebar.error("配置目录解析失败，模型配置暂不可用。请检查工作区路径后重启服务。")
+        config_dirs: tuple[Path, ...] = ()
+        api_key_env_vars: tuple[str, ...] = ()
+    else:
+        config_dirs = config_context.config_dirs
+        api_key_env_vars = collect_all_model_env_vars(config_context.config_loader)
+    model_options_by_scene = _build_model_options(config_context)
 
-    # 左侧边栏：渲染自选股列表
     selected_stock = render_sidebar(workspace_root=workspace_root)
+    model_selections = render_model_panel(
+        workspace_root=workspace_root,
+        config_dirs=config_dirs,
+        options_by_scene=model_options_by_scene,
+        api_key_env_vars=api_key_env_vars,
+    )
 
-    # 左侧边栏：渲染模型选择与 Key 配置
-    model_selections: dict[str, str] = {}
-    if prepared_deps is not None:
-        model_selections = render_model_panel(
-            workspace_root=workspace_root,
-            options_by_scene=model_options_by_scene,
+    # 第二步：装配 Host 运行时；失败时保留侧边栏，只在主功能区报错
+    prepared_deps = _ensure_host_runtime()
+    if prepared_deps is None:
+        init_error = st.session_state.get(HOST_INIT_ERROR_KEY) or "未知错误"
+        st.error(f"服务初始化失败: {init_error}")
+        st.info(
+            "侧边栏仍可使用：先在「⚙ 模型与 API Key」里填好 API Key，并修复上面提示的配置或依赖问题，"
+            "然后点下面的按钮重试，无需重启服务。"
+        )
+        if st.button("重试初始化", type="primary", key="retry_host_init_btn"):
+            st.session_state[HOST_INIT_ERROR_KEY] = None
+            st.session_state[PREPARED_DEPS_KEY] = None
+            st.rerun()
+        return
+
+    missing_env_vars = collect_missing_env_vars(model_selections, model_options_by_scene)
+    if missing_env_vars:
+        st.warning(
+            f"当前所选模型缺少 API Key：{'、'.join(missing_env_vars)}。"
+            "点左侧边栏「⚙ 模型与 API Key」填写后即可开始分析。"
         )
 
     # 主功能区
     if selected_stock is None:
         render_welcome_page()
-    elif prepared_deps is not None:
-        fins_service, chat_service, write_service = _resolve_services(prepared_deps)
-        render_stock_detail_page(
-            selected_stock=selected_stock,
-            workspace_root=workspace_root,
-            fins_service=fins_service,
-            chat_service=chat_service,
-            write_service=write_service,
-            model_selections=model_selections,
-        )
-    else:
-        st.error("财报服务不可用，无法展示股票详情。请检查配置后刷新页面。")
+        return
+
+    fins_service, chat_service, write_service = _resolve_services(prepared_deps)
+    render_stock_detail_page(
+        selected_stock=selected_stock,
+        workspace_root=workspace_root,
+        fins_service=fins_service,
+        chat_service=chat_service,
+        write_service=write_service,
+        model_selections=model_selections,
+    )
 
 
 def run_streamlit() -> int:

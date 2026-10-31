@@ -19,6 +19,7 @@ from dayu.contracts.fins import (
     FinsCommandName,
 )
 from dayu.fins.score_sec_ci import FORM_PROFILES
+from dayu.fins.ticker_normalization import normalize_ticker
 from dayu.services.contracts import FinsSubmission, FinsSubmitRequest
 from dayu.services.protocols import FinsServiceProtocol
 from dayu.web.streamlit.components.watchlist import WatchlistItem
@@ -33,7 +34,20 @@ from dayu.web.streamlit.pages.filing.download_progress import (
     run_download_stream_worker,
 )
 
-_DOWNLOAD_DEFAULT_FORM_TYPES: tuple[str, ...] = ("10-K", "10-Q")
+#: 美股可下载的 SEC 表单（与 ``FORM_PROFILES`` 一致）。
+_US_FORM_TYPES: tuple[str, ...] = tuple(FORM_PROFILES)
+#: 港股 / A 股使用财政期间口径，取值与 ``dayu.fins.pipelines.cn_form_utils`` 一致。
+_CN_HK_FORM_TYPES: tuple[str, ...] = ("FY", "H1", "Q1", "Q2", "Q3", "Q4")
+_CN_HK_FORM_LABELS: dict[str, str] = {
+    "FY": "FY（年报）",
+    "H1": "H1（半年报）",
+    "Q1": "Q1（一季报）",
+    "Q2": "Q2（二季报）",
+    "Q3": "Q3（三季报）",
+    "Q4": "Q4（四季报）",
+}
+_DEFAULT_US_FORM_TYPES: tuple[str, ...] = ("10-K", "10-Q")
+_DEFAULT_CN_HK_FORM_TYPES: tuple[str, ...] = ("FY", "H1")
 _DOWNLOAD_DEFAULT_LOOKBACK_YEARS = 3
 _DOWNLOAD_RUNTIME_STATE_KEY = "download_runtime_handles"
 _DOWNLOAD_EVENT_BATCH_LIMIT = 128
@@ -446,15 +460,70 @@ def _render_download_settings(
         )
 
 
+def _format_cn_hk_form_label(name: str) -> str:
+    """把财政期间取值格式化为带中文说明的展示文案。
+
+    参数:
+        name: 财政期间取值，如 ``FY`` / ``H1``。
+
+    返回值:
+        带中文说明的展示文案；未知取值原样返回。
+
+    异常:
+        无。
+    """
+
+    return _CN_HK_FORM_LABELS.get(name, name)
+
+
+def resolve_download_form_options(ticker: str) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+    """按市场返回可下载表单类型、默认选中项与提示文案。
+
+    美股走 SEC 表单（10-K / 10-Q 等）；港股与 A 股走财政期间口径（FY / H1 / Qn），
+    因为对应的下载链路只接受后者，传 SEC 表单会直接报「不支持的 form 输入」。
+
+    参数:
+        ticker: 标的代码，支持 ``00700`` / ``0700.HK`` / ``600519.SH`` / ``AAPL`` 等形态。
+
+    返回值:
+        ``(可选表单, 默认选中, 帮助文案)`` 三元组；ticker 无法识别时按美股处理，
+        与改造前的行为保持一致。
+
+    异常:
+        无。
+    """
+
+    try:
+        market = normalize_ticker(ticker).market
+    except ValueError:
+        market = "US"
+
+    if market == "US":
+        return (
+            _US_FORM_TYPES,
+            _DEFAULT_US_FORM_TYPES,
+            "选择需要下载的 SEC 表单类型",
+        )
+    return (
+        _CN_HK_FORM_TYPES,
+        _DEFAULT_CN_HK_FORM_TYPES,
+        "选择需要下载的报告期间：FY 年报、H1 半年报、Qn 季度报告",
+    )
+
+
 def _render_download_form_fields(ticker: str) -> _DownloadFormValues:
     """渲染下载设置表单字段并返回用户输入。"""
 
+    form_options, default_form_types, form_help = resolve_download_form_options(ticker)
+    is_us_market = form_options == _US_FORM_TYPES
+
     selected_form_types = st.multiselect(
         "选择要下载的财报表单类型",
-        options=FORM_PROFILES.keys(),
-        default=list(_DOWNLOAD_DEFAULT_FORM_TYPES),
-        help="选择需要下载的 SEC 表单类型",
-        key=f"download_form_types_{ticker}",
+        options=form_options,
+        default=list(default_form_types),
+        help=form_help,
+        key=f"download_form_types_v2_{ticker}",
+        format_func=(str if is_us_market else _format_cn_hk_form_label),
     )
 
     today = datetime.date.today()

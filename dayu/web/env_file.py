@@ -177,3 +177,52 @@ def upsert_env_value(workspace_root: Path, key: str, value: str) -> None:
 
     content = "\n".join(updated_lines) + "\n"
     path.write_text(content, encoding="utf-8")
+
+
+def remove_env_value(workspace_root: Path, key: str) -> bool:
+    """从工作区 ``.env`` 中删除指定变量。
+
+    只删除键名完全匹配的行，其它行与注释原样保留；文件不存在或键不存在时视为
+    无需操作。删除后同时从当前进程环境变量中移除，使界面上的「清除」立即生效。
+
+    参数:
+        workspace_root: 工作区根目录。
+        key: 环境变量名。
+
+    返回值:
+        实际删除了行时返回 True，否则返回 False。
+
+    异常:
+        OSError: 文件读取或写入失败时抛出。
+    """
+
+    normalized_key = key.strip()
+    if not _ENV_KEY_PATTERN.match(normalized_key):
+        return False
+
+    os.environ.pop(normalized_key, None)
+
+    path = env_file_path(workspace_root)
+    if not path.exists():
+        return False
+
+    existing_lines = path.read_text(encoding="utf-8").splitlines()
+    kept_lines: list[str] = []
+    removed = False
+    for raw_line in existing_lines:
+        stripped = raw_line.strip()
+        if not removed and not stripped.startswith(_COMMENT_PREFIX) and _KEY_VALUE_SEPARATOR in stripped:
+            candidate_key = stripped.split(_KEY_VALUE_SEPARATOR, 1)[0].strip()
+            if candidate_key == normalized_key:
+                removed = True
+                continue
+        kept_lines.append(raw_line)
+
+    if not removed:
+        return False
+
+    content = "\n".join(kept_lines)
+    if content:
+        content += "\n"
+    path.write_text(content, encoding="utf-8")
+    return True

@@ -21,6 +21,7 @@ from dayu.web.streamlit.pages.filing.download_panel import (
     _build_download_log_lines,
     _build_download_submit_request,
     _format_log_time,
+    resolve_download_form_options,
 )
 from dayu.web.streamlit.pages.filing.download_progress import LogEntry
 from dayu.web.streamlit.pages.filing_tab import (
@@ -398,3 +399,42 @@ def test_get_filing_list_service_raises_oserror() -> None:
 
     with pytest.raises(OSError, match="磁盘错误"):
         _get_filing_list(Path("/workspace"), "AAPL", _ErrorService())  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+class TestResolveDownloadFormOptions:
+    """下载表单类型按市场分派测试。
+
+    港股 / A 股链路的 form 只接受财政期间（FY / H1 / Qn），传 SEC 表单会直接
+    报「不支持的 form 输入」；这里锁定分派逻辑，避免再次给出美股选项。
+    """
+
+    def test_hk_ticker_uses_fiscal_periods(self) -> None:
+        """港股应给出财政期间选项，默认年报 + 半年报。"""
+        options, defaults, _help = resolve_download_form_options("00700")
+
+        assert "FY" in options
+        assert "10-K" not in options
+        assert defaults == ("FY", "H1")
+
+    def test_a_share_ticker_uses_fiscal_periods(self) -> None:
+        """A 股同样使用财政期间口径。"""
+        options, defaults, _help = resolve_download_form_options("600519.SH")
+
+        assert options == ("FY", "H1", "Q1", "Q2", "Q3", "Q4")
+        assert defaults == ("FY", "H1")
+
+    def test_us_ticker_uses_sec_forms(self) -> None:
+        """美股保留原有 SEC 表单口径。"""
+        options, defaults, _help = resolve_download_form_options("AAPL")
+
+        assert "10-K" in options
+        assert "10-Q" in options
+        assert "FY" not in options
+        assert defaults == ("10-K", "10-Q")
+
+    def test_unknown_ticker_falls_back_to_us(self) -> None:
+        """无法识别的 ticker 回退为美股口径，与改造前行为一致。"""
+        _options, defaults, _help = resolve_download_form_options("!!!invalid")
+
+        assert defaults == ("10-K", "10-Q")

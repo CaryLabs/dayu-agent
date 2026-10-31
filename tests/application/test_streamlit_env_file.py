@@ -13,9 +13,9 @@ from dayu.web.env_file import (
     parse_env_content,
     read_env_keys,
     read_env_values,
+    remove_env_value,
     upsert_env_value,
 )
-
 
 # ── env_file_path ─────────────────────────────────────────────────────
 
@@ -138,3 +138,40 @@ def test_upsert_env_value_rejects_multiline_value(tmp_path: Path) -> None:
     """值包含换行符时应被拒绝，避免破坏文件结构。"""
     with pytest.raises(ValueError):
         upsert_env_value(tmp_path, "A_KEY", "line1\nline2")
+
+
+# ── remove_env_value ─────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_remove_env_value_deletes_only_target_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """只删除目标键所在行，其它行与注释保留。"""
+    env_file_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    env_file_path(tmp_path).write_text(
+        "# 注释\nA_KEY=1\nB_KEY=2\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("A_KEY", "1")
+
+    assert remove_env_value(tmp_path, "A_KEY") is True
+    assert read_env_values(tmp_path) == {"B_KEY": "2"}
+    assert env_file_path(tmp_path).read_text(encoding="utf-8") == "# 注释\nB_KEY=2\n"
+    assert "A_KEY" not in os.environ
+
+
+@pytest.mark.unit
+def test_remove_env_value_returns_false_when_absent(tmp_path: Path) -> None:
+    """键不存在或文件不存在时返回 False，不抛异常。"""
+    assert remove_env_value(tmp_path, "A_KEY") is False
+
+    env_file_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    env_file_path(tmp_path).write_text("B_KEY=2\n", encoding="utf-8")
+
+    assert remove_env_value(tmp_path, "A_KEY") is False
+    assert read_env_values(tmp_path) == {"B_KEY": "2"}
+
+
+@pytest.mark.unit
+def test_remove_env_value_rejects_invalid_key(tmp_path: Path) -> None:
+    """非法键名直接返回 False，不触碰文件。"""
+    assert remove_env_value(tmp_path, "BAD KEY") is False
