@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -254,7 +255,15 @@ def _run_report_worker(
         exit_code = write_service.run(request)
         event_queue.put((int(exit_code), ""))
     except BaseException as exception:  # noqa: BLE001
-        event_queue.put((_WORKER_ERROR_STATUS, str(exception)))
+        tb_text = traceback.format_exc()
+        try:
+            from dayu.log import Log
+
+            Log.error(MODULE, f"报告生成 worker 异常: {exception!r}\n{tb_text}")
+        except Exception:  # noqa: BLE001
+            pass
+        message = str(exception).strip() or f"{type(exception).__name__}（无消息）"
+        event_queue.put((_WORKER_ERROR_STATUS, message))
 
 
 def start_report_task(
