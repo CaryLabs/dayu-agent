@@ -13,6 +13,8 @@ import streamlit as st
 
 from dayu.web.streamlit.components.watchlist import WatchlistItem, load_watchlist_items, render_watchlist_manager
 
+_MARKET_LABELS: dict[str, str] = {"CN": "A股", "HK": "港股", "US": "美股"}
+
 
 def render_sidebar(
     workspace_root: Path,
@@ -93,6 +95,9 @@ def render_sidebar(
     selected_item = None
     for item in watchlist:
         display_name = f"{item.company_name} ({item.ticker})"
+        market_label = _MARKET_LABELS.get(item.market)
+        if market_label:
+            display_name += f" · {market_label}"
         current_selected_ticker = st.session_state.get("selected_ticker")
         is_selected = isinstance(current_selected_ticker, str) and current_selected_ticker == item.ticker
 

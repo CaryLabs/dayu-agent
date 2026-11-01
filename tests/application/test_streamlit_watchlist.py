@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import urllib.request
 from pathlib import Path
 
 import pandas as pd
@@ -22,6 +23,7 @@ from dayu.web.streamlit.components.watchlist import (  # noqa: E402
     _build_final_dataframe,
     load_watchlist_items,
     save_watchlist_items,
+    search_stock_suggestions,
 )
 
 
@@ -212,3 +214,119 @@ def test_apply_table_to_storage_preserves_created_at(tmp_path: Path) -> None:
     assert loaded[0].company_name == "Apple Inc."
     assert loaded[0].created_at == "2025-01-01T00:00:00+00:00"
     assert loaded[0].updated_at != "2025-06-01T00:00:00+00:00"
+
+
+@pytest.mark.unit
+def test_save_and_load_round_trip_preserves_market(tmp_path: Path) -> None:
+    """验证 market 字段可持久化并正确读回。"""
+
+    items = [
+        WatchlistItem(
+            ticker="0700",
+            company_name="腾讯控股",
+            market="HK",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        ),
+    ]
+    save_watchlist_items(tmp_path, items)
+    loaded = load_watchlist_items(tmp_path)
+    assert loaded[0].market == "HK"
+
+
+@pytest.mark.unit
+def test_load_legacy_json_without_market_defaults_to_empty(tmp_path: Path) -> None:
+    """验证旧格式（无 market 字段）加载后 market 为空串，向后兼容。"""
+
+    storage_path = tmp_path / ".dayu" / "streamlit" / "watchlist.json"
+    storage_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "ticker": "AAPL",
+                        "company_name": "Apple",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "updated_at": "2026-01-01T00:00:00+00:00",
+                    }
+                ],
+                "version": "1.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_watchlist_items(tmp_path)
+    assert len(loaded) == 1
+    assert loaded[0].market == ""
+
+
+@pytest.mark.unit
+def test_search_stock_suggestions_maps_market_and_normalizes(monkeypatch) -> None:
+    """验证检索函数解析东财返回、映射市场、规范化港股代码并过滤非股票。"""
+
+    payload = {
+        "QuotationCodeTable": {
+            "Data": [
+                {"Code": "00700", "Name": "腾讯控股", "Classify": "HK"},
+                {"Code": "600519", "Name": "贵州茅台", "Classify": "AStock"},
+                {"Code": "AAPL", "Name": "苹果", "Classify": "UsStock"},
+                {"Code": "000001", "Name": "上证指数", "Classify": "Index"},
+            ]
+        }
+    }
+
+    class _FakeResponse:
+        def read(self) -> bytes:
+            return json.dumps(payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> bool:
+            return False
+
+    def _fake_urlopen(request, timeout=None):
+        return _FakeResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    suggestions = search_stock_suggestions("腾讯")
+    assert [(s.code, s.market) for s in suggestions] == [
+        ("0700", "HK"),
+        ("600519", "CN"),
+        ("AAPL", "US"),
+    ]
+
+
+@pytest.mark.unit
+def test_apply_table_to_storage_preserves_market(tmp_path: Path) -> None:
+    """验证编辑公司名称时保留原有 market。"""
+
+    original = pd.DataFrame([{"股票代码": "0700", "公司名称": "腾讯控股"}])
+    previous = [
+        WatchlistItem(
+            ticker="0700",
+            company_name="腾讯控股",
+            market="HK",
+            created_at="2025-01-01T00:00:00+00:00",
+            updated_at="2025-01-01T00:00:00+00:00",
+        ),
+    ]
+    editor_state = {
+        "deleted_rows": [],
+        "edited_rows": {"0": {"公司名称": "腾讯控股有限公司"}},
+        "added_rows": [],
+    }
+
+    ok, _ = _apply_table_to_storage(
+        workspace_root=tmp_path,
+        original=original,
+        editor_state=editor_state,
+        previous=previous,
+    )
+
+    assert ok is True
+    loaded = load_watchlist_items(tmp_path)
+    assert loaded[0].market == "HK"

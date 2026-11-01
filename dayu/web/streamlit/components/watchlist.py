@@ -7,12 +7,17 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+from dayu.fins.domain.enums import Market
+from dayu.fins.ticker_normalization import try_normalize_ticker
 
 
 
@@ -23,6 +28,7 @@ class WatchlistItem:
     属性:
         ticker: 股票代码，如 AAPL。
         company_name: 公司名称，如 苹果。
+        market: 市场标识，取值 US/HK/CN；旧数据或未知市场为空串。
         created_at: 创建时间 ISO8601 格式。
         updated_at: 更新时间 ISO8601 格式。
     """
@@ -31,6 +37,7 @@ class WatchlistItem:
     company_name: str
     created_at: str
     updated_at: str
+    market: str = ""
 
 
 def _watchlist_storage_path(workspace_root: Path) -> Path:
@@ -78,6 +85,7 @@ def load_watchlist_items(workspace_root: Path) -> list[WatchlistItem]:
                 company_name=str(item_data["company_name"]),
                 created_at=str(item_data["created_at"]),
                 updated_at=str(item_data["updated_at"]),
+                market=str(item_data.get("market", "")),
             )
         )
     return items
@@ -101,6 +109,7 @@ def save_watchlist_items(workspace_root: Path, items: list[WatchlistItem]) -> No
             {
                 "ticker": item.ticker,
                 "company_name": item.company_name,
+                "market": item.market,
                 "created_at": item.created_at,
                 "updated_at": item.updated_at,
             }
@@ -111,6 +120,73 @@ def save_watchlist_items(workspace_root: Path, items: list[WatchlistItem]) -> No
     with open(storage_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
+
+@dataclass(frozen=True)
+class StockSuggestion:
+    """股票联想结果。
+
+    属性:
+        code: 股票代码，如 AAPL、00700、600519。
+        name: 股票名称。
+        market: 市场标识，取值 US/HK/CN。
+    """
+
+    code: str
+    name: str
+    market: str
+
+
+# 东方财富 suggest 返回的 Classify 字段 → 市场标识映射。
+_MARKET_BY_CLASSIFY: dict[str, str] = {
+    "AStock": Market.CN.value,
+    "HK": Market.HK.value,
+    "UsStock": Market.US.value,
+}
+
+
+def search_stock_suggestions(keyword: str, limit: int = 10) -> list[StockSuggestion]:
+    """调用东方财富 suggest 接口做股票联想检索。
+
+    参数:
+        keyword: 搜索关键字（股票代码或名称，中英文均可）。
+        limit: 最多返回条数，默认 10。
+
+    返回值:
+        匹配的股票联想列表；网络失败、接口异常或无结果时返回空列表（不抛出）。
+    """
+
+    query = urllib.parse.urlencode({"input": keyword, "type": 14})
+    url = f"https://searchapi.eastmoney.com/api/suggest/get?{query}"
+    request = urllib.request.Request(
+        url,
+        headers={"Referer": "https://www.eastmoney.com/"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return []
+
+    rows = ((payload.get("QuotationCodeTable") or {}).get("Data")) or []
+    suggestions: list[StockSuggestion] = []
+    for row in rows:
+        market = _MARKET_BY_CLASSIFY.get(str(row.get("Classify", "")))
+        if market is None:
+            # 非股票类型（基金/指数/债券等）直接跳过。
+            continue
+        raw_code = str(row.get("Code", "")).strip()
+        normalized = try_normalize_ticker(raw_code)
+        code = normalized.canonical if normalized is not None else raw_code
+        suggestions.append(
+            StockSuggestion(
+                code=code,
+                name=str(row.get("Name", "")).strip(),
+                market=market,
+            )
+        )
+        if len(suggestions) >= limit:
+            break
+    return suggestions
 
 
 def _is_cell_empty(val: object) -> bool:
@@ -281,6 +357,7 @@ def _apply_table_to_storage(
                         company_name=name,
                         created_at=prev.created_at,
                         updated_at=now,
+                        market=prev.market,
                     )
                 )
         else:
@@ -314,6 +391,113 @@ def _trigger_sidebar_refresh() -> None:
     st.rerun()
 
 
+_MARKET_LABELS: dict[str, str] = {
+    Market.CN.value: "A股",
+    Market.HK.value: "港股",
+    Market.US.value: "美股",
+    "": "",
+}
+
+
+def _market_label(market: str) -> str:
+    """返回市场的中文展示标签。
+
+    参数:
+        market: 市场标识（US/HK/CN），空串表示未知。
+
+    返回值:
+        中文标签；未识别的值原样返回。
+    """
+
+    return _MARKET_LABELS.get(market, market)
+
+
+def _render_stock_search(workspace_root: Path, editor_key: str) -> None:
+    """渲染搜索联想添加区：市场筛选 + 关键字搜索 + 结果点选添加。
+
+    参数:
+        workspace_root: 工作区根目录。
+        editor_key: data_editor 的 session state key，添加后清除以刷新表格。
+
+    异常:
+        无：检索失败时在界面提示，不向调用方抛出。
+    """
+
+    st.markdown("**🔍 搜索添加**")
+    market_options = {
+        "全部": None,
+        "A股": Market.CN.value,
+        "港股": Market.HK.value,
+        "美股": Market.US.value,
+    }
+
+    col_market, col_keyword, col_search = st.columns([1, 3, 1], vertical_alignment="bottom")
+    with col_market:
+        market_label = st.selectbox("市场", list(market_options), key="wl_search_market")
+    with col_keyword:
+        keyword = st.text_input("关键字（代码或名称）", key="wl_search_keyword")
+    with col_search:
+        search_clicked = st.button("搜索", key="wl_search_btn", width="stretch")
+
+    if not (search_clicked and keyword.strip()):
+        return
+
+    try:
+        suggestions = search_stock_suggestions(keyword.strip())
+    except Exception as exc:
+        st.error(f"搜索失败: {exc}")
+        return
+
+    market_filter = market_options[market_label]
+    if market_filter is not None:
+        suggestions = [s for s in suggestions if s.market == market_filter]
+
+    if not suggestions:
+        st.info("未找到匹配的股票。")
+        return
+
+    for suggestion in suggestions:
+        _render_suggestion_row(workspace_root, suggestion, editor_key)
+
+
+def _render_suggestion_row(
+    workspace_root: Path,
+    suggestion: StockSuggestion,
+    editor_key: str,
+) -> None:
+    """渲染单条联想结果与「添加」按钮。
+
+    参数:
+        workspace_root: 工作区根目录。
+        suggestion: 股票联想结果。
+        editor_key: data_editor 的 session state key。
+    """
+
+    label = f"{suggestion.name}（{suggestion.code}）· {_market_label(suggestion.market)}"
+    if st.button(f"＋ {label}", key=f"wl_add_{suggestion.code}", width="stretch"):
+        items = load_watchlist_items(workspace_root)
+        if any(item.ticker.upper() == suggestion.code.upper() for item in items):
+            st.session_state["wl_add_feedback"] = ("warn", f"{suggestion.code} 已在自选股中。")
+        else:
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            items.append(
+                WatchlistItem(
+                    ticker=suggestion.code,
+                    company_name=suggestion.name,
+                    market=suggestion.market,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            save_watchlist_items(workspace_root, items)
+            st.session_state["wl_add_feedback"] = ("ok", f"已添加 {suggestion.name}（{suggestion.code}）。")
+        # 触发整页刷新，让侧边栏与表格立即更新
+        st.session_state["watchlist_needs_refresh"] = True
+        if editor_key in st.session_state:
+            del st.session_state[editor_key]
+        st.rerun()
+
+
 @st.dialog("自选股管理", width="large")
 def render_watchlist_manager(workspace_root: Path) -> None:
     """弹出对话框：在表格内添加、删除、编辑自选股，保存后写回文件。
@@ -334,6 +518,19 @@ def render_watchlist_manager(workspace_root: Path) -> None:
         # 清除 data_editor 状态以重新加载最新数据
         if editor_key in st.session_state:
             del st.session_state[editor_key]
+
+    # 显示搜索添加的即时反馈
+    add_feedback = st.session_state.pop("wl_add_feedback", None)
+    if add_feedback:
+        kind, text = add_feedback
+        if kind == "ok":
+            st.success(text)
+        else:
+            st.warning(text)
+
+    _render_stock_search(workspace_root, editor_key)
+
+    st.markdown("---")
 
     st.markdown("在表格中编辑；底部可新增行；删除行即移除该自选股。编辑后检查代码与名称是否正确，然后点击 **保存**。")
 
