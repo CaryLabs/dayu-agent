@@ -199,7 +199,10 @@ def build_write_request(
         web_provider="",
         resume=not overwrite,
         write_model_override_name=normalized_model_name,
-        audit_model_override_name=normalized_model_name,
+        # infer/audit/decision 等 scene 的 allowlist 是 thinking 系列，与 write
+        # 的非 thinking 模型不兼容；留空让这些 scene 各自沿用 manifest 的 default，
+        # 避免 write 选中模型被 infer allowlist 拒绝。
+        audit_model_override_name="",
         chapter_filter=chapter_filter.strip(),
         fast=fast,
     )
