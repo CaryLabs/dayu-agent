@@ -262,6 +262,7 @@ def main() -> None:
     """
 
     from dayu.web.streamlit.components.model_panel import (
+        MODEL_SCENES,
         collect_missing_env_vars,
         ensure_model_selection_seeded,
         render_model_panel,
