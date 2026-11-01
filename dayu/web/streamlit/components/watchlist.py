@@ -415,6 +415,10 @@ def _market_label(market: str) -> str:
 def _render_stock_search(workspace_root: Path, editor_key: str) -> None:
     """渲染搜索联想添加区：市场筛选 + 关键字搜索 + 结果点选添加。
 
+    搜索结果缓存在 session_state（``wl_search_results``），这样「＋添加」按钮
+    点击所触发的 rerun 中结果列表仍会渲染，点选逻辑才能正确执行——否则会因
+    「搜索」按钮在后续 rerun 中返回 False 而导致结果列表不渲染、添加失效。
+
     参数:
         workspace_root: 工作区根目录。
         editor_key: data_editor 的 session state key，添加后清除以刷新表格。
@@ -439,25 +443,80 @@ def _render_stock_search(workspace_root: Path, editor_key: str) -> None:
     with col_search:
         search_clicked = st.button("搜索", key="wl_search_btn", width="stretch")
 
-    if not (search_clicked and keyword.strip()):
-        return
+    # 点击「搜索」→ 执行检索并把结果缓存到 session_state。
+    if search_clicked:
+        if not keyword.strip():
+            st.warning("请输入关键字后再搜索。")
+            st.session_state["wl_search_results"] = []
+            st.session_state["wl_search_searched"] = False
+            return
+        try:
+            suggestions = search_stock_suggestions(keyword.strip())
+        except Exception as exc:
+            st.error(f"搜索失败: {exc}")
+            st.session_state["wl_search_results"] = []
+            st.session_state["wl_search_searched"] = False
+            return
+        market_filter = market_options[market_label]
+        if market_filter is not None:
+            suggestions = [s for s in suggestions if s.market == market_filter]
+        st.session_state["wl_search_results"] = suggestions
+        st.session_state["wl_search_searched"] = True
 
-    try:
-        suggestions = search_stock_suggestions(keyword.strip())
-    except Exception as exc:
-        st.error(f"搜索失败: {exc}")
-        return
-
-    market_filter = market_options[market_label]
-    if market_filter is not None:
-        suggestions = [s for s in suggestions if s.market == market_filter]
-
+    # 每次 rerun 都渲染缓存结果，保证「＋」按钮的点击能被处理。
+    suggestions = st.session_state.get("wl_search_results", [])
     if not suggestions:
-        st.info("未找到匹配的股票。")
+        if st.session_state.get("wl_search_searched", False):
+            st.info("未找到匹配的股票。")
         return
 
     for suggestion in suggestions:
         _render_suggestion_row(workspace_root, suggestion, editor_key)
+
+
+def _add_suggestion_to_watchlist(
+    workspace_root: Path,
+    suggestion: StockSuggestion,
+) -> tuple[str, str]:
+    """将一条联想结果写入自选股存储，返回 (结果类型, 提示信息)。
+
+    结果类型：``ok`` 已添加、``warn`` 已存在、``error`` 读写失败。
+
+    参数:
+        workspace_root: 工作区根目录。
+        suggestion: 股票联想结果。
+
+    返回值:
+        二元组 (kind, message)。
+
+    异常:
+        无：读写失败时返回 (``error``, 提示)，不向调用方抛出。
+    """
+
+    try:
+        items = load_watchlist_items(workspace_root)
+    except Exception as exc:
+        return "error", f"加载自选股失败: {exc}"
+
+    if any(item.ticker.upper() == suggestion.code.upper() for item in items):
+        return "warn", f"{suggestion.code} 已在自选股中。"
+
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    items.append(
+        WatchlistItem(
+            ticker=suggestion.code,
+            company_name=suggestion.name,
+            market=suggestion.market,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    try:
+        save_watchlist_items(workspace_root, items)
+    except Exception as exc:
+        return "error", f"保存自选股失败: {exc}"
+
+    return "ok", f"已添加 {suggestion.name}（{suggestion.code}）。"
 
 
 def _render_suggestion_row(
@@ -475,22 +534,8 @@ def _render_suggestion_row(
 
     label = f"{suggestion.name}（{suggestion.code}）· {_market_label(suggestion.market)}"
     if st.button(f"＋ {label}", key=f"wl_add_{suggestion.code}", width="stretch"):
-        items = load_watchlist_items(workspace_root)
-        if any(item.ticker.upper() == suggestion.code.upper() for item in items):
-            st.session_state["wl_add_feedback"] = ("warn", f"{suggestion.code} 已在自选股中。")
-        else:
-            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-            items.append(
-                WatchlistItem(
-                    ticker=suggestion.code,
-                    company_name=suggestion.name,
-                    market=suggestion.market,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            save_watchlist_items(workspace_root, items)
-            st.session_state["wl_add_feedback"] = ("ok", f"已添加 {suggestion.name}（{suggestion.code}）。")
+        kind, text = _add_suggestion_to_watchlist(workspace_root, suggestion)
+        st.session_state["wl_add_feedback"] = (kind, text)
         # 触发整页刷新，让侧边栏与表格立即更新
         st.session_state["watchlist_needs_refresh"] = True
         if editor_key in st.session_state:
@@ -525,6 +570,8 @@ def render_watchlist_manager(workspace_root: Path) -> None:
         kind, text = add_feedback
         if kind == "ok":
             st.success(text)
+        elif kind == "error":
+            st.error(text)
         else:
             st.warning(text)
 

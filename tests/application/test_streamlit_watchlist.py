@@ -18,7 +18,9 @@ import pytest
 pytest.importorskip("streamlit")
 
 from dayu.web.streamlit.components.watchlist import (  # noqa: E402
+    StockSuggestion,
     WatchlistItem,
+    _add_suggestion_to_watchlist,
     _apply_table_to_storage,
     _build_final_dataframe,
     load_watchlist_items,
@@ -330,3 +332,56 @@ def test_apply_table_to_storage_preserves_market(tmp_path: Path) -> None:
     assert ok is True
     loaded = load_watchlist_items(tmp_path)
     assert loaded[0].market == "HK"
+
+
+@pytest.mark.unit
+def test_add_suggestion_to_watchlist_appends_new_item(tmp_path: Path) -> None:
+    """验证联想结果可正确写入自选股（含 market 字段）。"""
+
+    suggestion = StockSuggestion(code="0700", name="腾讯控股", market="HK")
+
+    kind, message = _add_suggestion_to_watchlist(tmp_path, suggestion)
+
+    assert kind == "ok"
+    loaded = load_watchlist_items(tmp_path)
+    assert len(loaded) == 1
+    assert loaded[0].ticker == "0700"
+    assert loaded[0].company_name == "腾讯控股"
+    assert loaded[0].market == "HK"
+
+
+@pytest.mark.unit
+def test_add_suggestion_to_watchlist_duplicate_warns(tmp_path: Path) -> None:
+    """验证重复添加（大小写不敏感）返回 warn 且不重复写入。"""
+
+    existing = [
+        WatchlistItem(
+            ticker="AAPL",
+            company_name="苹果",
+            market="US",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        ),
+    ]
+    save_watchlist_items(tmp_path, existing)
+
+    suggestion = StockSuggestion(code="aapl", name="苹果", market="US")
+    kind, message = _add_suggestion_to_watchlist(tmp_path, suggestion)
+
+    assert kind == "warn"
+    assert "已在自选股中" in message
+    loaded = load_watchlist_items(tmp_path)
+    assert len(loaded) == 1
+
+
+@pytest.mark.unit
+def test_add_suggestion_to_watchlist_multiple_markets(tmp_path: Path) -> None:
+    """验证不同市场、不同代码的联想结果都能各自写入。"""
+
+    _add_suggestion_to_watchlist(tmp_path, StockSuggestion(code="0700", name="腾讯控股", market="HK"))
+    _add_suggestion_to_watchlist(tmp_path, StockSuggestion(code="600519", name="贵州茅台", market="CN"))
+    _add_suggestion_to_watchlist(tmp_path, StockSuggestion(code="AAPL", name="苹果", market="US"))
+
+    loaded = load_watchlist_items(tmp_path)
+    by_ticker = {item.ticker: item.market for item in loaded}
+    assert by_ticker == {"0700": "HK", "600519": "CN", "AAPL": "US"}
