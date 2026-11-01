@@ -24,6 +24,7 @@ _MANIFEST_RELATIVE_DIR = Path("prompts") / "manifests"
 _SCENE_NAME_PATTERN = re.compile(r"^[a-z0-9_]+$")
 _MODEL_SECTION_KEY = "model"
 _ALLOWED_NAMES_KEY = "allowed_names"
+_SELECTED_NAME_KEY = "selected_name"
 
 #: 界面 scene 到「实际会复用该模型」的 scene 集合。
 #:
@@ -203,3 +204,56 @@ def ensure_scene_model_allowed_in_scope(
         if changed:
             written.append(target_scene)
     return tuple(written)
+
+
+def set_scene_selected_model(
+    *,
+    workspace_root: Path,
+    config_dirs: Sequence[Path],
+    scene_name: str,
+    model_name: str,
+) -> bool:
+    """把界面选中的模型写入 scene manifest 的 ``model.selected_name``。
+
+    该字段是用户当前选择的持久化记录，独立于 ``allowed_names``（放行列表）与
+    ``default_name``（默认模型），用于在重启后恢复界面选择。已等于目标值时幂等
+    不写入；manifest 其余字段原样保留。
+
+    参数:
+        workspace_root: 工作区根目录，覆盖文件写入 ``<它>/config/prompts/manifests``。
+        config_dirs: 配置目录搜索顺序，用于定位当前生效的 manifest。
+        scene_name: scene 名称。
+        model_name: 需要记录的选中模型名。
+
+    返回值:
+        实际写入覆盖文件时返回 True；原已一致时返回 False。
+
+    异常:
+        FileNotFoundError: manifest 不存在时抛出。
+        TypeError: manifest 结构不合法（非对象/非字典）时抛出。
+        ValueError: scene 名称或模型名非法时抛出。
+        OSError: 目录创建或写入失败时抛出。
+    """
+
+    normalized_model_name = str(model_name or "").strip()
+    if not normalized_model_name:
+        raise ValueError("model_name 不能为空")
+
+    raw_manifest = read_effective_manifest(config_dirs, scene_name)
+    model_section = raw_manifest.get(_MODEL_SECTION_KEY)
+    if not isinstance(model_section, dict):
+        raise TypeError(f"manifest.model 必须是对象: scene={scene_name}")
+    current = model_section.get(_SELECTED_NAME_KEY)
+    if isinstance(current, str) and current == normalized_model_name:
+        return False
+
+    model_section[_SELECTED_NAME_KEY] = normalized_model_name
+    raw_manifest[_MODEL_SECTION_KEY] = model_section
+
+    target_path = manifest_path_for(workspace_root / "config", scene_name)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(
+        json.dumps(raw_manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return True

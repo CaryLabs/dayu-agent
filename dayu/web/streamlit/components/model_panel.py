@@ -21,9 +21,20 @@ import streamlit as st
 
 from dayu.log import Log
 from dayu.web.env_file import read_env_values, remove_env_value, upsert_env_value
-from dayu.web.streamlit.config_context import HOST_INIT_ERROR_KEY, reset_runtime_session_state
-from dayu.web.streamlit.manifest_allowlist import ensure_scene_model_allowed_in_scope
-from dayu.web.streamlit.model_options import ModelOption, pick_effective_model_name
+from dayu.web.streamlit.config_context import (
+    HOST_INIT_ERROR_KEY,
+    WebConfigContext,
+    reset_runtime_session_state,
+)
+from dayu.web.streamlit.manifest_allowlist import (
+    ensure_scene_model_allowed_in_scope,
+    set_scene_selected_model,
+)
+from dayu.web.streamlit.model_options import (
+    ModelOption,
+    load_scene_selected_model,
+    pick_effective_model_name,
+)
 
 MODULE = "WEB.MODEL_PANEL"
 
@@ -209,6 +220,47 @@ def scene_session_key(scene_name: str) -> str:
     """
 
     return _SCENE_SESSION_KEYS.get(scene_name, f"{scene_name}_model_name")
+
+
+def ensure_model_selection_seeded(
+    *,
+    config_context: WebConfigContext | None,
+    scene_names: Sequence[str],
+) -> None:
+    """把持久化的模型选择恢复到会话状态。
+
+    在每次页面渲染早期调用：仅当用户本次会话尚未在 ``session_state`` 里改过选择时，
+    才从工作区 manifest 的 ``model.selected_name`` 读回上次保存的选择；都不存在时
+    留空，由 :func:`current_model_name` 回退到默认模型。这样重启后界面能恢复用户
+    的模型选择，而不是回退到 ``default_name``。
+
+    参数:
+        config_context: 轻量配置上下文；为 ``None`` 时跳过（无配置可读取）。
+        scene_names: 需要恢复的 scene 名称列表。
+
+    返回值:
+        无。
+
+    异常:
+        无。读取失败被日志收敛，不影响页面其余渲染。
+    """
+
+    if config_context is None:
+        return
+    for scene_name in scene_names:
+        key = scene_session_key(scene_name)
+        if key in st.session_state:
+            continue
+        try:
+            selected = load_scene_selected_model(
+                prompt_asset_store=config_context.prompt_asset_store,
+                scene_name=scene_name,
+            )
+        except Exception as exc:  # noqa: BLE001 - 恢复失败不应阻断首屏
+            Log.warn(f"恢复模型选择失败 scene={scene_name}: {exc}", module=MODULE)
+            selected = None
+        if selected:
+            st.session_state[key] = selected
 
 
 def current_model_name(scene_name: str, options: Sequence[ModelOption]) -> str:
@@ -497,6 +549,19 @@ def _render_model_config_dialog(
     except (OSError, TypeError, ValueError) as exc:
         st.error(f"保存失败: {exc}")
         return
+
+    # 持久化用户选中的模型（独立于放行列表与默认模型），重启后由界面恢复。
+    # 写入失败不应回滚已保存的 Key，仅记录告警。
+    for scene_name, selected_name in selections.items():
+        try:
+            set_scene_selected_model(
+                workspace_root=workspace_root,
+                config_dirs=config_dirs,
+                scene_name=scene_name,
+                model_name=selected_name,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            Log.warn(f"持久化模型选择失败 scene={scene_name}: {exc}", module=MODULE)
 
     for scene_name, selected_name in selections.items():
         st.session_state[scene_session_key(scene_name)] = selected_name

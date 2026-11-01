@@ -25,6 +25,7 @@ MODULE = "WEB.MODEL_OPTIONS"
 _SCENE_MODEL_KEY = "model"
 _SCENE_MODEL_ALLOWED_NAMES_KEY = "allowed_names"
 _SCENE_MODEL_DEFAULT_NAME_KEY = "default_name"
+_SCENE_MODEL_SELECTED_NAME_KEY = "selected_name"
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,38 @@ def load_scene_model_options(
             )
         )
     return tuple(options)
+
+
+def load_scene_selected_model(
+    *,
+    prompt_asset_store: PromptAssetStoreProtocol,
+    scene_name: str,
+) -> str | None:
+    """读取 scene 当前持久化的选中模型名。
+
+    该值由界面保存时写入 manifest 的 ``model.selected_name``，用于在重启后恢复用户
+    的模型选择。旧 manifest 或结构缺失时返回 ``None``，由调用方回退到默认模型。
+
+    参数:
+        prompt_asset_store: prompt 资产仓储。
+        scene_name: scene 名称。
+
+    返回值:
+        已持久化的选中模型名；未设置或读取失败时返回 ``None``。
+
+    异常:
+        无。任何解析异常都被收敛为 ``None``。
+    """
+
+    try:
+        manifest = prompt_asset_store.load_scene_manifest(scene_name)
+        model_asset = manifest[_SCENE_MODEL_KEY]
+        selected = model_asset.get(_SCENE_MODEL_SELECTED_NAME_KEY)
+        if isinstance(selected, str) and selected.strip():
+            return selected
+        return None
+    except (KeyError, OSError, ValueError, TypeError):
+        return None
 
 
 def collect_all_model_env_vars(config_loader: ConfigLoaderProtocol) -> tuple[str, ...]:

@@ -263,6 +263,7 @@ def main() -> None:
 
     from dayu.web.streamlit.components.model_panel import (
         collect_missing_env_vars,
+        ensure_model_selection_seeded,
         render_model_panel,
     )
     from dayu.web.streamlit.components.sidebar import render_sidebar
@@ -315,6 +316,8 @@ def main() -> None:
         config_dirs = config_context.config_dirs
         api_key_env_vars = collect_all_model_env_vars(config_context.config_loader)
     model_options_by_scene = _build_model_options(config_context)
+    # 重启后从工作区 manifest 恢复用户已保存的模型选择
+    ensure_model_selection_seeded(config_context=config_context, scene_names=MODEL_SCENES)
 
     selected_stock = render_sidebar(workspace_root=workspace_root)
     model_selections = render_model_panel(
