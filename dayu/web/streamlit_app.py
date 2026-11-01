@@ -277,9 +277,19 @@ def main() -> None:
     workspace_root = _resolve_workspace_root()
     workspace_root.mkdir(parents=True, exist_ok=True)
 
+    # 必须在自检与模型选项构建之前，先把工作区 .env 注入 os.environ：
+    # 否则自检会把「进程环境被启动脚本刻意清空」误判成 Key 冲突，模型选项快照
+    # 也会因为读不到 Key 而误报「所选模型缺少 API Key」。llm_models 的占位符在
+    # 模型加载时才替换，这里提前注入不影响后续装配。
+    from dayu.log import Log
+    from dayu.web.env_file import load_workspace_env
+
+    loaded_env_keys = load_workspace_env(workspace_root)
+    if loaded_env_keys:
+        Log.info(f"已从工作区 .env 注入环境变量: {', '.join(loaded_env_keys)}", module=MODULE)
+
     # 启动自检：外部环境变量（系统/用户级）与工作区 .env 的 Key 冲突检测。
     # 以 .env 为准；发现冲突时在界面告警并落日志，避免「界面改了 Key 却仍用旧值」的混淆。
-    from dayu.log import Log
     from dayu.web.env_file import detect_env_key_conflicts
 
     env_conflicts = detect_env_key_conflicts(workspace_root)
